@@ -37,7 +37,7 @@ from sbtab.data.datamodule import TabularDataModule
 from sbtab.data.splits import SplitConfigHoldout
 from sbtab.transforms.pipeline import TransformPipeline
 from sbtab.solvers.ipf_dsb.solver import IPFDSBSolver, IPFDSBConfig
-
+from sbtab.solvers.imf_dsbm.solver import IMFDSBMSolver, IMFDSBMConfig
 
 def load_california_housing_sklearn() -> pd.DataFrame:
     """
@@ -165,8 +165,22 @@ def main() -> None:
         seed=42,
     )
 
-    model = IPFDSBSolver(dim=dim, cfg=cfg)
+    # model = IPFDSBSolver(dim=dim, cfg=cfg)
+    # model.fit(train_df)
+    cfg = IMFDSBMConfig(
+    fb_sequence=("b","f","b","f","b"),
+    inner_iters=2000,
+    num_steps=1000,
+    sigma=0.1,
+    eps=1e-3,
+    first_coupling="ref",
+    device="cpu",
+    seed=42,
+    )
+
+    model = IMFDSBMSolver(dim=train_df.shape[1], cfg=cfg)
     model.fit(train_df)
+    
 
     # -------------------------------
     # 5) Generate synthetic samples (in transformed space)
