@@ -1,0 +1,18 @@
+{
+  "dataset": "king_county_housing",
+  "best_avg_wd": 2864.975026782517,
+  "best_trial": 29,
+  "n_trials": 50,
+  "elapsed_sec": 7764.393406152725,
+  "best_params": {
+    "sigma": 0.11998850770894713,
+    "num_steps": 1079,
+    "eps": 0.0005401568741500583,
+    "inner_iters": 1525,
+    "lr": 0.0003324052393062946,
+    "batch_size": 128,
+    "imf_len": 3,
+    "first_coupling": "ind",
+    "noise": false
+  }
+}

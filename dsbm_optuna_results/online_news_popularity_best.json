@@ -1,0 +1,18 @@
+{
+  "dataset": "online_news_popularity",
+  "best_avg_wd": 1952.644006135403,
+  "best_trial": 31,
+  "n_trials": 50,
+  "elapsed_sec": 9527.304027795792,
+  "best_params": {
+    "sigma": 0.2653875210055891,
+    "num_steps": 353,
+    "eps": 0.0019466867162371735,
+    "inner_iters": 3546,
+    "lr": 0.00038348139451510556,
+    "batch_size": 512,
+    "imf_len": 5,
+    "first_coupling": "ind",
+    "noise": false
+  }
+}

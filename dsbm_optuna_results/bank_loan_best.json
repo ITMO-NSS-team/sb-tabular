@@ -1,0 +1,18 @@
+{
+  "dataset": "bank_loan",
+  "best_avg_wd": 39.526822110047256,
+  "best_trial": 33,
+  "n_trials": 50,
+  "elapsed_sec": 3426.597752094269,
+  "best_params": {
+    "sigma": 0.298224783036394,
+    "num_steps": 1633,
+    "eps": 0.0028507539696843794,
+    "inner_iters": 2729,
+    "lr": 0.0004955163029182558,
+    "batch_size": 256,
+    "imf_len": 7,
+    "first_coupling": "ind",
+    "noise": true
+  }
+}
