@@ -2,3 +2,9 @@
 examples/sbtab
 sbtab/__pycache__/__init__.cpython-311.pyc
 *.pyc
+dsbm_multi_optuna.db
+.vscode/settings.json
+catboost_info/catboost_training.json
+catboost_info/
+
+sbtab/experiments/sbtab

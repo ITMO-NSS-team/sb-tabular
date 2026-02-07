@@ -32,6 +32,7 @@ DEFAULT_DATASETS = [
     "online_shoppers",
     "covertype",
     "german_credit",
+    "california_housing"
 ]
 
 
@@ -122,7 +123,7 @@ def make_objective_for_dataset(
 
             synth_orig = inv_pipe.inverse_transform(synth_scaled)
 
-            score = average_wd(real_test_orig, synth_orig, cols)
+            score = average_wd(test_scaled, synth_scaled, cols)
 
             trial.report(score, step=0)
             if trial.should_prune():
@@ -141,11 +142,11 @@ def make_objective_for_dataset(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pickle", type=str, default="/Users/anaxagor/Documents/projects/sb-tabular/sbtab/data/datasets/datasets_continuous_only.pkl")
+    ap.add_argument("--pickle", type=str, default="C:/Users/Anaxagor/Documents/projects/sb-tabular/sbtab/data/datasets/datasets_continuous_only.pkl")
     ap.add_argument("--datasets", type=str, default=",".join(DEFAULT_DATASETS))
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--device", type=str, default="cpu")
+    ap.add_argument("--device", type=str, default="cuda")
 
     ap.add_argument("--n-trials", type=int, default=50)
     ap.add_argument("--timeout", type=int, default=0, help="Seconds per dataset (0 => no timeout)")
@@ -209,6 +210,8 @@ def main() -> None:
         print(f"Columns: {len(cols)}")
         print(f"Train size (scaled): {len(train_scaled)}")
         print(f"Test size  (scaled): {len(test_scaled)}")
+
+            
 
         # Create study per dataset
         study_name = f"{args.study_prefix}__{ds_name}"
