@@ -1,5 +1,5 @@
 """
-python sbtab\experiments\dsb_metrics.py.py --pickle data.pkl --best_json_dir optuna_results/
+python sbtab\experiments\dsb_metrics.py --pickle data.pkl --best_json_dir optuna_results/
 """
 
 from __future__ import annotations
@@ -231,7 +231,7 @@ def main() -> None:
             df_train_raw = df.iloc[train_idx].copy()
             df_test_raw = df.iloc[test_idx].copy()
 
-            # Препроцессинг (как у руководителя)
+            # Preprocessing via sbtab pipeline
             schema = TabularSchema(feature_cols=cols)
             pipe = TransformPipeline.default_continuous_dropna()
             pipe.fit(df_train_raw, schema)
@@ -239,19 +239,20 @@ def main() -> None:
             train_scaled = pipe.transform(df_train_raw)
             test_scaled = pipe.transform(df_test_raw)
 
-            # Обучение вашего DSB солвера
+            # Fit DSB Solver
             model = IPFDSBSolver(dim=len(cols), cfg=cfg)
             model.fit(train_scaled)
 
-            # Генерация (размер = тестовый фолд)
+            # Sample synthetic data
             x_synth = model.sample(n=len(test_scaled), seed=args.seed + fold_id)
             synth_scaled = pd.DataFrame(x_synth, columns=cols)
 
-            # Расчет метрик
+            # Calculate Metrics
             m_kl = avg_kl_hist(test_scaled, synth_scaled, cols=cols, n_bins=args.n_bins_kl)
             m_wd = avg_wd(test_scaled, synth_scaled, cols=cols)
             m_corr = corr_frobenius(test_scaled, synth_scaled, cols=cols)
 
+            # Utility evaluation
             util_delta, r2_real, r2_syn = utility_delta_r2_percent(
                 train_real=train_scaled,
                 test_real=test_scaled,
@@ -269,14 +270,14 @@ def main() -> None:
 
             print(f"avg_KL={m_kl:.6f}  avg_WD={m_wd:.6f}  corr_F={m_corr:.6f}  deltaR2%={util_delta:.3f}")
 
-        # Сводка по датасету
+        # Summary for current dataset
         fold_df = pd.DataFrame(fold_rows)
         fold_csv = outdir / f"{ds_name}_fold_metrics.csv"
         fold_df.to_csv(fold_csv, index=False)
 
         summary = {
             "dataset": ds_name, "metrics_mean": {}, "metrics_std": {},
-            "dsbm_config": asdict(cfg) # называем ключ также для совместимости
+            "solver_config": asdict(cfg)
         }
 
         for key in ["avg_kl", "avg_wd", "corr_frob", "delta_r2_percent", "r2_real", "r2_synth"]:
@@ -300,7 +301,7 @@ def main() -> None:
             "r2_synth_mean": summary["metrics_mean"]["r2_synth"],
         })
 
-    # Итоговый CSV
+    # Global CSV summary
     global_df = pd.DataFrame(global_rows).sort_values("avg_wd_mean", ascending=True)
     global_df.to_csv(outdir / "kfold_summary_all_datasets.csv", index=False)
     print(f"\nGlobal summary saved to: {outdir / 'kfold_summary_all_datasets.csv'}")

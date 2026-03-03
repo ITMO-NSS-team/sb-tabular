@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from typing import Optional, Dict, Any
 from xgboost import XGBRegressor
-from sbtab.models.field.neural.time_embedding import FourierTime # Используем уже созданный эмбеддинг
+from sbtab.models.field.neural.time_embedding import FourierTime
 
 class XGBField:
     """

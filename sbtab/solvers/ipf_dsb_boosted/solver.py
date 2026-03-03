@@ -8,7 +8,7 @@ model = IPFDSBBoostedSolver(
     ipf_iters=5,
     gbdt_params={"iterations": 500, "depth": 6}
 )
-model.fit(train_sc)
+model.fit(train_sc)ч
 x_syn = model.sample(n=len(test_sc))
 """
 

@@ -8,25 +8,25 @@ from typing import List, Tuple, Optional
 
 def sliced_wasserstein(X: np.ndarray, Y: np.ndarray, n_proj: int = 256) -> float:
     """
-    Sliced Wasserstein Distance (SWD). 
-    Оценивает сходство совместного распределения всех признаков.
+    Cut-off Wasserstein distance (SWD). 
+    Evaluates the similarity of the joint distribution of all features.
     """
     X_t = torch.as_tensor(X, dtype=torch.float32)
     Y_t = torch.as_tensor(Y, dtype=torch.float32)
 
-    # Центрируем данные
+    # Centering the data
     Xc, Yc = X_t - X_t.mean(0), Y_t - Y_t.mean(0)
     
-    # Генерируем случайные векторы проекции
+    # Generating random projection
     thetas = torch.randn(n_proj, X_t.shape[1])
     thetas = thetas / thetas.norm(dim=1, keepdim=True)
 
     sw2 = 0.0
     for theta in thetas:
-        # Проецируем многомерные данные на линию
+        # Projecting multidimensional data onto a line
         x1 = Xc @ theta
         y1 = Yc @ theta
-        # Считаем 1D Вассерштейн через сортировку
+        # We consider 1 day to be a weekend because of the schedules
         x1, _ = torch.sort(x1)
         y1, _ = torch.sort(y1)
         sw2 += F.mse_loss(x1, y1, reduction="mean")
@@ -37,9 +37,9 @@ def avg_wd(real: pd.DataFrame, synth: pd.DataFrame, cols: List[str]) -> float:
     return float(np.mean([wasserstein_distance(real[c].to_numpy(), synth[c].to_numpy()) for c in cols]))
 
 def mmd_rbf(X: np.ndarray, Y: np.ndarray, sigma: Optional[float] = None) -> float:
-    """Maximum Mean Discrepancy с RBF ядром."""
+    """Maximum average discrepancy in RBF units."""
     X, Y = np.asarray(X), np.asarray(Y)
-    # Сабсэмплинг для вычисления сигмы (ускорение)
+    # Subsampling to calculate sigma (acceleration)
     X_sub = X[:1000]
     if sigma is None:
         dists = cdist(X_sub, X_sub, metric='euclidean')
@@ -55,7 +55,7 @@ def mmd_rbf(X: np.ndarray, Y: np.ndarray, sigma: Optional[float] = None) -> floa
     return float(k_xx + k_yy - 2 * k_xy)
 
 def calculate_marginal_kl(X_real: np.ndarray, X_syn: np.ndarray, bins: int = 50) -> float:
-    """Средняя KL-дивергенция по всем признакам (marginal fidelity)."""
+    """The average KL is a divergence by all criteria (marginal fidelity)."""
     vals = []
     epsilon = 1e-8 
     for j in range(X_real.shape[1]):
@@ -70,7 +70,7 @@ def calculate_marginal_kl(X_real: np.ndarray, X_syn: np.ndarray, bins: int = 50)
     return float(np.mean(vals))
 
 def calculate_frobenius_corr_diff(X_real: np.ndarray, X_syn: np.ndarray) -> float:
-    """Корреляционное расстояние (норма Фробениуса разности матриц Пирсона)."""
+    """Correlation distance (Frobenius norm of the difference of Pearson matrices)."""
     C_real = np.nan_to_num(np.corrcoef(X_real, rowvar=False))
     C_syn = np.nan_to_num(np.corrcoef(X_syn, rowvar=False))
     return float(np.linalg.norm(C_real - C_syn, ord="fro"))
