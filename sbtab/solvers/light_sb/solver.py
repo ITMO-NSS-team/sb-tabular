@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from sbtab.bridge.reference import GaussianReference
 from sbtab.solvers.light_sb.config import LightSBConfig
-from sbtab.solvers.light_sb.updater import LightSBM
+from sbtab.models.sb.light_sb import LightSBM
 
 
 class LightSBSolver:
