@@ -14,8 +14,9 @@ from sbtab.data.schema import TabularSchema
 from sbtab.data.datamodule import TabularDataModule
 from sbtab.data.splits import SplitConfigHoldout
 from sbtab.transforms.pipeline import TransformPipeline
-from sbtab.solvers.ipf_dsb.solver import IPFDSBSolver, IPFDSBConfig
-from sbtab.solvers.imf_dsbm.solver import IMFDSBMSolver, IMFDSBMConfig
+from sbtab.solvers.imf_dsbm_boost.solver import IMFDSBMBoostConfig, IMFDSBMBoostSolver
+from sbtab.models.field.boosted.catboost_discrete_field import CatBoostDiscreteFieldConfig
+
 
 def load_california_housing_sklearn() -> pd.DataFrame:
     """
@@ -126,38 +127,30 @@ def main() -> None:
     # -------------------------------
     dim = len(joint_cols)
 
-    cfg = IPFDSBConfig(
-        ipf_iters=6,
-        num_steps=20,
-        gamma_min=1e-4,
-        gamma_max=1e-2,
-        schedule="geom",
-        batch_size=512,
-        cache_batches=200,
-        lr=2e-4,
-        weight_decay=0.0,
-        epochs_per_phase=1,
-        grad_clip=1.0,
+    cb_cfg = CatBoostDiscreteFieldConfig(
+    iterations=500,
+    depth=8,
+    learning_rate=0.05,
+    task_type="GPU",
+    feature_mode="x_x0",   # <--- includes x0 as extra context
+    verbose=False,
+)
+
+    cfg = IMFDSBMBoostConfig(
+        fb_sequence=("b", "f", "b", "f", "b"),
+        num_steps=10,
+        sigma=0.10,
+        eps=1e-3,
+        first_coupling="ind",
+        n_noise_per_pair=2,
         noise=True,
-        device="cuda" if os.environ.get("CUDA_VISIBLE_DEVICES", "") != "" else "cpu",
         seed=42,
+        catboost=cb_cfg,
+        sample_direction="f",
     )
 
-    # model = IPFDSBSolver(dim=dim, cfg=cfg)
-    # model.fit(train_df)
-    cfg = IMFDSBMConfig(
-    fb_sequence=("b","f","b","f","b"),
-    inner_iters=2000,
-    num_steps=1000,
-    sigma=0.1,
-    eps=1e-3,
-    first_coupling="ref",
-    device="cpu",
-    seed=42,
-    )
-
-    model = IMFDSBMSolver(dim=train_df.shape[1], cfg=cfg)
-    model.fit(train_df)
+    model = IMFDSBMBoostSolver(dim=train_df.shape[1], cfg=cfg).fit(train_df)
+    x_synth = model.sample(n=5000, seed=123)
     
 
     # -------------------------------
