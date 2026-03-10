@@ -99,9 +99,7 @@ class IMFDSBMBoostSolver:
 
             xt, target = self._dsbm_train_tuple(z0, z1, float(t), fb)
 
-            X_feat = field._build_features(xt, x0=z0, t=float(t))
-
-            field.fit_step(k, X_feat, target)
+            field.fit_step(k, xt, target, x0=z0)
 
         return field
 
