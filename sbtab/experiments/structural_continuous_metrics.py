@@ -3,9 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
-from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -13,10 +12,13 @@ from scipy.stats import wasserstein_distance
 from sklearn.metrics import r2_score
 from sklearn.model_selection import KFold
 
-# Core sbtab imports
 from sbtab.data.schema import TabularSchema
 from sbtab.transforms.pipeline import TransformPipeline
-from sbtab.solvers.ipf_dsb_boosted import StructuralBoostedDSBSolver
+from sbtab.solvers.ipf_dsb_boosted.structural_continuous_solver import (
+    StructuralContinuousBoostedSolver,
+    StructuralContinuousBoostedConfig,
+)
+from sbtab.models.field.boosted.catboost_continuous_field import CatBoostContinuousFieldConfig
 from sbtab.evaluation.metrics.statistical import sliced_wasserstein
 
 
@@ -25,7 +27,7 @@ from sbtab.evaluation.metrics.statistical import sliced_wasserstein
 # ----------------------------
 
 TARGET_COL_BY_DATASET: Dict[str, str] = {
-    "german_credit": 'duration',
+    "german_credit": "duration",
     "online_news_popularity": " shares",
     "covertype": "Horizontal_Distance_To_Hydrology",
     "online_shoppers": "ProductRelated",
@@ -33,7 +35,7 @@ TARGET_COL_BY_DATASET: Dict[str, str] = {
     "bank_loan": "Income",
     "diabetes": "target",
     "california_housing": "MedHouseVal",
-    "king_county_housing": "price"
+    "king_county_housing": "price",
 }
 
 
@@ -45,20 +47,13 @@ def make_regressor(random_state: int):
     try:
         from catboost import CatBoostRegressor
         return CatBoostRegressor(
-            depth=8,
-            learning_rate=0.1,
-            iterations=500,
-            loss_function="RMSE",
-            random_seed=random_state,
-            verbose=False,
+            depth=8, learning_rate=0.1, iterations=500,
+            loss_function="RMSE", random_seed=random_state, verbose=False,
         )
     except ImportError:
         from sklearn.ensemble import HistGradientBoostingRegressor
         return HistGradientBoostingRegressor(
-            random_state=random_state,
-            max_depth=8,
-            learning_rate=0.1,
-            max_iter=500,
+            random_state=random_state, max_depth=8, learning_rate=0.1, max_iter=500,
         )
 
 
@@ -71,16 +66,12 @@ def avg_wd(real: pd.DataFrame, synth: pd.DataFrame, cols: List[str]) -> float:
 
 
 def avg_kl_hist(
-    real: pd.DataFrame,
-    synth: pd.DataFrame,
-    cols: List[str],
-    n_bins: int = 50,
-    eps: float = 1e-12,
+    real: pd.DataFrame, synth: pd.DataFrame, cols: List[str],
+    n_bins: int = 50, eps: float = 1e-12,
 ) -> float:
-    kls: List[float] =[]
+    kls: List[float] = []
     for c in cols:
-        r = real[c].to_numpy()
-        s = synth[c].to_numpy()
+        r, s = real[c].to_numpy(), synth[c].to_numpy()
         lo = float(np.min([np.min(r), np.min(s)]))
         hi = float(np.max([np.max(r), np.max(s)]))
         if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
@@ -104,24 +95,17 @@ def corr_frobenius(real: pd.DataFrame, synth: pd.DataFrame, cols: List[str]) -> 
 
 
 def utility_delta_r2_percent(
-    train_real: pd.DataFrame,
-    test_real: pd.DataFrame,
-    train_synth: pd.DataFrame,
-    feature_cols: List[str],
-    target_col: str,
-    seed: int,
+    train_real: pd.DataFrame, test_real: pd.DataFrame, train_synth: pd.DataFrame,
+    feature_cols: List[str], target_col: str, seed: int,
 ) -> Tuple[float, float, float]:
-    Xtr = train_real[feature_cols].to_numpy()
-    ytr = train_real[target_col].to_numpy()
-    Xte = test_real[feature_cols].to_numpy()
-    yte = test_real[target_col].to_numpy()
+    Xtr, ytr = train_real[feature_cols].to_numpy(), train_real[target_col].to_numpy()
+    Xte, yte = test_real[feature_cols].to_numpy(), test_real[target_col].to_numpy()
 
     reg_real = make_regressor(seed)
     reg_real.fit(Xtr, ytr)
     r2_real = float(r2_score(yte, reg_real.predict(Xte)))
 
-    Xs = train_synth[feature_cols].to_numpy()
-    ys = train_synth[target_col].to_numpy()
+    Xs, ys = train_synth[feature_cols].to_numpy(), train_synth[target_col].to_numpy()
     reg_syn = make_regressor(seed + 1)
     reg_syn.fit(Xs, ys)
     r2_syn = float(r2_score(yte, reg_syn.predict(Xte)))
@@ -131,7 +115,7 @@ def utility_delta_r2_percent(
 
 
 # ----------------------------
-# Params loading -> Solver Args
+# Params loading -> Config
 # ----------------------------
 
 def load_best_params(best_json_path: Path) -> Dict:
@@ -141,24 +125,23 @@ def load_best_params(best_json_path: Path) -> Dict:
     return {k: v for k, v in data.items() if isinstance(v, (int, float, str, bool))}
 
 
-def get_solver_args_from_best(best: Dict) -> Dict[str, Any]:
-    """
-    Maps Optuna best params to StructuralBoostedDSBSolver constructor arguments.
-    """
-    cat_keys =["iterations", "depth", "learning_rate", "l2_leaf_reg", "verbose", "task_type"]
-    cat_params = {k: best[k] for k in cat_keys if k in best}
-    
-    # Default fallback for CatBoost if tuning didn't provide specific params
-    if not cat_params:
-        cat_params = {"iterations": 500, "depth": 6, "learning_rate": 0.05, "verbose": 0, "task_type": "GPU"}
-        
-    return {
-        "num_steps": int(best.get("num_steps", 20)),
-        "ipf_iters": int(best.get("ipf_iters", 4)),
-        "alpha_ou": float(best.get("alpha_ou", 1.0)),
-        "n_bins": int(best.get("n_bins", 5)),
-        "cat_params": cat_params
-    }
+def build_config(best: Dict, seed: int) -> StructuralContinuousBoostedConfig:
+    cat_cfg = CatBoostContinuousFieldConfig(
+        iterations=int(best.get("iterations", 2000)),
+        depth=int(best.get("depth", 8)),
+        learning_rate=float(best.get("learning_rate", 0.05)),
+        l2_leaf_reg=float(best.get("l2_leaf_reg", 3.0)),
+        task_type=best.get("task_type", "CPU"),
+        feature_mode="x_x0_t",
+    )
+    return StructuralContinuousBoostedConfig(
+        num_steps=int(best.get("num_steps", 30)),
+        ipf_iters=int(best.get("ipf_iters", 5)),
+        alpha_ou=float(best.get("alpha_ou", 1.0)),
+        n_bins=int(best.get("n_bins", 5)),
+        seed=seed,
+        catboost=cat_cfg,
+    )
 
 
 # ----------------------------
@@ -167,16 +150,14 @@ def get_solver_args_from_best(best: Dict) -> Dict[str, Any]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pickle", type=str, required=True, help="../data/datasets/datasets_continuous_only.pkl")
-    ap.add_argument("--best_json_dir", type=str, required=True, help="dsb_optuna_results/")
-    ap.add_argument("--outdir", type=str, default="structural_dsb_kfold_eval")
-
+    ap.add_argument("--pickle", type=str, required=True, help="path to datasets_continuous_only.pkl")
+    ap.add_argument("--best_json_dir", type=str, required=True, help="dir with <dataset>_best.json")
+    ap.add_argument("--outdir", type=str, default="structural_continuous_kfold_eval")
     ap.add_argument("--datasets", type=str, default=",".join(TARGET_COL_BY_DATASET.keys()))
     ap.add_argument("--n-splits", type=int, default=5)
     ap.add_argument("--shuffle", action="store_true", default=True)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n-bins-kl", type=int, default=20)
-
     args = ap.parse_args()
 
     best_dir = Path(args.best_json_dir)
@@ -186,13 +167,14 @@ def main() -> None:
     with open(args.pickle, "rb") as f:
         my_data: Dict[str, pd.DataFrame] = pickle.load(f)
 
-    ds_list =[d.strip() for d in args.datasets.split(",") if d.strip()]
-    global_rows =[]
+    ds_list = [d.strip() for d in args.datasets.split(",") if d.strip()]
+    global_rows: List[Dict] = []
 
     for ds_name in ds_list:
-        if ds_name not in my_data: continue
+        if ds_name not in my_data:
+            continue
         print("\n" + "=" * 100)
-        print(f"STRUCTURAL DSB DATASET: {ds_name}")
+        print(f"STRUCTURAL CONTINUOUS BOOSTED | DATASET: {ds_name}")
         print("=" * 100)
 
         df = my_data[ds_name].copy()
@@ -203,51 +185,42 @@ def main() -> None:
         target_col = TARGET_COL_BY_DATASET[ds_name]
         feature_cols = [c for c in cols if c != target_col]
 
-        # Load best params
         best_json_path = best_dir / f"{ds_name}_best.json"
         best_params = load_best_params(best_json_path) if best_json_path.exists() else {}
-        solver_args = get_solver_args_from_best(best_params)
+        cfg = build_config(best_params, seed=args.seed)
 
         kf = KFold(n_splits=args.n_splits, shuffle=args.shuffle, random_state=args.seed)
-        idx = np.arange(len(df))
-        fold_rows =[]
+        fold_rows: List[Dict] = []
 
-        for fold_id, (train_idx, test_idx) in enumerate(kf.split(idx)):
-            print(f"\n--- Fold {fold_id+1}/{args.n_splits} ---")
+        for fold_id, (train_idx, test_idx) in enumerate(kf.split(np.arange(len(df)))):
+            print(f"\n--- Fold {fold_id + 1}/{args.n_splits} ---")
 
             df_train_raw = df.iloc[train_idx].copy()
             df_test_raw = df.iloc[test_idx].copy()
 
-            # Preprocessing via sbtab pipeline
             schema = TabularSchema(feature_cols=cols)
             pipe = TransformPipeline.default_continuous_dropna()
             pipe.fit(df_train_raw, schema)
 
-            # Convert to DataFrame because Structural Solver uses column names for DAG
-            train_scaled = pd.DataFrame(pipe.transform(df_train_raw), columns=cols)
-            test_scaled = pd.DataFrame(pipe.transform(df_test_raw), columns=cols)
+            train_scaled = pipe.transform(df_train_raw)
+            test_scaled = pipe.transform(df_test_raw)
 
-            # Fit Structural Solver
-            model = StructuralBoostedDSBSolver(**solver_args, seed=args.seed)
-            model.fit(train_scaled)
+            train_df = pd.DataFrame(train_scaled, columns=cols) if not isinstance(train_scaled, pd.DataFrame) else train_scaled
+            test_df = pd.DataFrame(test_scaled, columns=cols) if not isinstance(test_scaled, pd.DataFrame) else test_scaled
 
-            # Sample synthetic data (Solver returns DataFrame)
-            synth_scaled = model.sample(n=len(test_scaled))
+            model = StructuralContinuousBoostedSolver(cfg=cfg)
+            model.fit(train_df)
 
-            # Calculate Metrics
-            m_kl = avg_kl_hist(test_scaled, synth_scaled, cols=cols, n_bins=args.n_bins_kl)
-            m_wd = avg_wd(test_scaled, synth_scaled, cols=cols)
-            m_corr = corr_frobenius(test_scaled, synth_scaled, cols=cols)
-            m_swd = sliced_wasserstein(test_scaled.to_numpy(), synth_scaled.to_numpy())
+            synth_df = model.sample(n=len(test_df))
 
-            # Utility evaluation
+            m_kl = avg_kl_hist(test_df, synth_df, cols=cols, n_bins=args.n_bins_kl)
+            m_wd = avg_wd(test_df, synth_df, cols=cols)
+            m_corr = corr_frobenius(test_df, synth_df, cols=cols)
+            m_swd = sliced_wasserstein(test_df.to_numpy(), synth_df.to_numpy())
+
             util_delta, r2_real, r2_syn = utility_delta_r2_percent(
-                train_real=train_scaled,
-                test_real=test_scaled,
-                train_synth=synth_scaled,
-                feature_cols=feature_cols,
-                target_col=target_col,
-                seed=args.seed + fold_id,
+                train_real=train_df, test_real=test_df, train_synth=synth_df,
+                feature_cols=feature_cols, target_col=target_col, seed=args.seed + fold_id,
             )
 
             fold_rows.append({
@@ -255,22 +228,21 @@ def main() -> None:
                 "avg_kl": m_kl, "avg_wd": m_wd, "corr_frob": m_corr, "swd": m_swd,
                 "delta_r2_percent": util_delta, "r2_real": r2_real, "r2_synth": r2_syn,
             })
-
             print(f"avg_KL={m_kl:.6f}  avg_WD={m_wd:.6f}  SWD={m_swd:.4f}  deltaR2%={util_delta:.3f}")
 
-        # Summary for current dataset
         fold_df = pd.DataFrame(fold_rows)
-        fold_csv = outdir / f"{ds_name}_fold_metrics.csv"
-        fold_df.to_csv(fold_csv, index=False)
+        fold_df.to_csv(outdir / f"{ds_name}_fold_metrics.csv", index=False)
 
         summary = {
             "dataset": ds_name,
-            "metrics_mean": fold_df.mean().to_dict(),
-            "metrics_std": fold_df.std(ddof=0).to_dict(),
-            "solver_config": solver_args
+            "metrics_mean": fold_df.mean(numeric_only=True).to_dict(),
+            "metrics_std": fold_df.std(ddof=0, numeric_only=True).to_dict(),
+            "solver_config": {
+                "num_steps": cfg.num_steps, "ipf_iters": cfg.ipf_iters,
+                "alpha_ou": cfg.alpha_ou, "n_bins": cfg.n_bins, "seed": cfg.seed,
+            },
         }
-        summary_json = outdir / f"{ds_name}_kfold_summary.json"
-        summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        (outdir / f"{ds_name}_kfold_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
         global_rows.append({
             "dataset": ds_name,
@@ -283,10 +255,10 @@ def main() -> None:
             "r2_synth_mean": summary["metrics_mean"]["r2_synth"],
         })
 
-    # Global CSV summary
     global_df = pd.DataFrame(global_rows).sort_values("avg_wd_mean", ascending=True)
     global_df.to_csv(outdir / "kfold_summary_all_datasets.csv", index=False)
     print(f"\nDONE. Global summary saved to {outdir}")
+
 
 if __name__ == "__main__":
     main()

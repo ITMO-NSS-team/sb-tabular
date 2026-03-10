@@ -91,18 +91,24 @@ class CatBoostTimeDiscretizedField:
     def fit_step(
         self,
         k: int,
-        X_feat: np.ndarray,
+        x: np.ndarray,
         y: np.ndarray,
+        *,
+        x0: Optional[np.ndarray] = None,
     ):
         """
         Fit model at time index k.
 
-        X_feat: (n, n_features)
-        y: (n, dim)
+        x:  (n, dim)       — raw state vector
+        y:  (n, dim)       — regression target
+        x0: (n, d_parent)  — optional parent context (for structural / AR modes)
         """
 
         self._check_deps()
         from catboost import CatBoostRegressor
+
+        t = float(self.t_grid[k])
+        X_feat = self._build_features(x, x0=x0, t=t)
 
         boosting_type = "Plain" if self.cfg.task_type == "GPU" else "Ordered"
 
