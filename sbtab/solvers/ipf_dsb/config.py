@@ -4,16 +4,14 @@ from typing import Literal, Optional
 
 @dataclass
 class IPFDSBConfig:
-    """Конфигурация для солвера IPF-DSB."""
+    """Solver configuration IPF-DSB."""
     ipf_iters: int = 6
 
-    # Временная сетка
     num_steps: int = 20
     gamma_min: float = 1e-4
     gamma_max: float = 1e-2
     schedule: Literal["linear", "geom"] = "geom"
 
-    # Параметры обучения
     batch_size: int = 512
     cache_batches: int = 200  
     lr: float = 2e-4
@@ -21,7 +19,6 @@ class IPFDSBConfig:
     epochs_per_phase: int = 1
     grad_clip: Optional[float] = 1.0
 
-    # Самплер
     noise: bool = True
     device: str = "cpu"
     seed: int = 42
