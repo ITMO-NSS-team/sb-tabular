@@ -151,9 +151,8 @@ class IMFDSBMBoostSolver:
         )
 
         for k, t in enumerate(self.t_grid):
-            xt, x0_ctx, target = self._build_step_batch(z0, z1, float(t), fb)
-            X_feat = field._build_features(xt, x0=x0_ctx, t=float(t))
-            field.fit_step(k, X_feat, target)
+            xt, _, target = self._build_step_batch(z0, z1, float(t), fb)
+            field.fit_step(k, xt, target)
 
         if fb == "f":
             self.field_f = field
@@ -179,7 +178,7 @@ class IMFDSBMBoostSolver:
         step_indices = range(N) if direction == "f" else range(N - 1, -1, -1)
 
         for k in step_indices:
-            drift = field.predict_step(k, x, x0=x0)
+            drift = field.predict_step(k, x)
             x = x + drift * dt
 
             if self.cfg.noise and sigma != 0.0:
