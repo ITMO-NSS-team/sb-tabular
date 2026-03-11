@@ -14,8 +14,8 @@ from sbtab.data.schema import TabularSchema
 from sbtab.data.datamodule import TabularDataModule
 from sbtab.data.splits import SplitConfigHoldout
 from sbtab.transforms.pipeline import TransformPipeline
-from sbtab.solvers.imf_dsbm_boost.solver import IMFDSBMBoostConfig, IMFDSBMBoostSolver
-from sbtab.models.field.boosted.catboost_discrete_field import CatBoostDiscreteFieldConfig
+from sbtab.solvers.discrete_time.joint_distribution.boosting.imf_dsbm_boost.solver import IMFDSBMBoostConfig, IMFDSBMBoostSolver
+from sbtab.models.boosted.catboost_discrete_joint import CatBoostDiscreteFieldConfig
 
 
 def load_california_housing_sklearn() -> pd.DataFrame:
@@ -132,7 +132,7 @@ def main() -> None:
     depth=8,
     learning_rate=0.05,
     task_type="GPU",
-    feature_mode="x_x0",   # <--- includes x0 as extra context
+    feature_mode="x", 
     verbose=False,
 )
 
@@ -146,7 +146,6 @@ def main() -> None:
         noise=True,
         seed=42,
         catboost=cb_cfg,
-        sample_direction="f",
     )
 
     model = IMFDSBMBoostSolver(dim=train_df.shape[1], cfg=cfg).fit(train_df)

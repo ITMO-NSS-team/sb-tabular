@@ -15,7 +15,7 @@ from sbtab.data.datamodule import TabularDataModule
 from sbtab.data.splits import SplitConfigHoldout
 from sbtab.transforms.pipeline import TransformPipeline
 from sbtab.solvers.ipf_dsb.solver import IPFDSBSolver, IPFDSBConfig
-from sbtab.solvers.imf_dsbm.solver import IMFDSBMSolver, IMFDSBMConfig
+from sbtab.solvers.continuous_time.joint_distribution.mlp.imf_dsbm.solver import IMFDSBMSolver, IMFDSBMConfig
 
 def load_california_housing_sklearn() -> pd.DataFrame:
     """
