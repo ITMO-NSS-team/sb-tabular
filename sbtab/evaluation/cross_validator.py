@@ -20,6 +20,7 @@ from sbtab.bridge.pathsampler import DiscretePathSampler
 from sbtab.bridge.reference import CategoricalReference
 from sbtab.bridge.timegrid import TimeGrid
 from sbtab.data.datamodule import TabularDataModule
+from sbtab.data.splits import SafeCategoricalKFold
 from sbtab.evaluation.metrics import Metrics
 from sbtab.models.neural.CSBMTableMLP import CSBMTableMLP
 from sbtab.solvers.csbm import CSBMUpdater, CSBMSolver
@@ -48,54 +49,95 @@ class CrossValidator:
         self.k_folds = k_folds
         self.seed_everything(seed)
 
-    def run(self, datamodule: TabularDataModule, pure_cat_cols: List[str], discrete_cols: List[str],
-            num_cols: List[str]) -> pd.DataFrame:
+    def run(
+        self,
+        datamodule: TabularDataModule,
+        pure_cat_cols: List[str],
+        discrete_cols: List[str],
+        num_cols: List[str],
+    ) -> pd.DataFrame:
+
         all_fold_results = []
-        folds_dict = datamodule.get_all_folds()
+        clean_df = datamodule.get_clean_df().reset_index(drop=True)
 
-        for fold_id, fold_data in folds_dict.items():
+        cat_cols_for_safe = [
+            c for c in (pure_cat_cols + discrete_cols) if c in clean_df.columns
+        ]
+
+        y_stratify = None
+        if (
+            self.task_type == "classification"
+            and self.target_col
+            and self.target_col in clean_df.columns
+        ):
+            y_stratify = clean_df[self.target_col].values
+
+        safe_kf = SafeCategoricalKFold(
+            cat_columns=cat_cols_for_safe,
+            n_splits=self.k_folds,
+            shuffle=True,
+            random_state=self.seed,
+        )
+
+        for fold_id, (train_idx, test_idx) in enumerate(safe_kf.split(clean_df, y_stratify)):
             print(f"  Fold {fold_id + 1}/{self.k_folds}")
-
             self.seed_everything(self.seed)
 
-            train_df = fold_data.train.copy()
-            test_df = fold_data.test.copy()
+            train_fold = clean_df.iloc[train_idx].copy().reset_index(drop=True)
+            test_fold = clean_df.iloc[test_idx].copy().reset_index(drop=True)
 
-            clean_num = [c for c in num_cols if c in train_df.columns and train_df[c].std() > 1e-5]
-            clean_cat = [c for c in pure_cat_cols if c in train_df.columns and train_df[c].nunique() > 1]
-            clean_disc = [c for c in discrete_cols if c in train_df.columns and train_df[c].nunique() > 1]
+            clean_num = [
+                c for c in num_cols
+                if c in train_fold.columns and train_fold[c].std() > 1e-5
+            ]
+            clean_cat = [
+                c for c in pure_cat_cols
+                if c in train_fold.columns and train_fold[c].nunique() > 1
+            ]
+            clean_disc = [
+                c for c in discrete_cols
+                if c in train_fold.columns and train_fold[c].nunique() > 1
+            ]
             all_cat_discrete = clean_cat + clean_disc
 
-            train_df = train_df.dropna(subset=clean_num + all_cat_discrete).reset_index(drop=True)
-            test_df = test_df.dropna(subset=clean_num + all_cat_discrete).reset_index(drop=True)
+            train_fold = train_fold.dropna(subset=clean_num + all_cat_discrete).reset_index(drop=True)
+            test_fold = test_fold.dropna(subset=clean_num + all_cat_discrete).reset_index(drop=True)
 
             if all_cat_discrete:
-                fold_encoder = OrdinalEncoder(dtype=np.int64, handle_unknown='use_encoded_value', unknown_value=-1)
-                train_cat_np = fold_encoder.fit_transform(train_df[all_cat_discrete])
+                fold_encoder = OrdinalEncoder(
+                    dtype=np.int64, handle_unknown="use_encoded_value", unknown_value=-1
+                )
+                train_cat_np = fold_encoder.fit_transform(train_fold[all_cat_discrete])
                 fold_cardinalities = [len(cats) for cats in fold_encoder.categories_]
-                cat_categories = {col: list(fold_encoder.categories_[i]) for i, col in enumerate(all_cat_discrete)}
+                cat_categories = {
+                    col: list(fold_encoder.categories_[i])
+                    for i, col in enumerate(all_cat_discrete)
+                }
             else:
-                train_cat_np = np.empty((len(train_df), 0), dtype=int)
+                train_cat_np = np.empty((len(train_fold), 0), dtype=int)
                 fold_cardinalities = []
                 cat_categories = {}
 
             scaler = StandardScaler()
             if clean_num:
-                train_num_scaled = scaler.fit_transform(train_df[clean_num].to_numpy())
-                test_num_scaled = scaler.transform(test_df[clean_num].to_numpy())
+                train_num_scaled = scaler.fit_transform(train_fold[clean_num].to_numpy())
+                test_num_scaled = scaler.transform(test_fold[clean_num].to_numpy())
             else:
-                train_num_scaled = np.empty((len(train_df), 0))
-                test_num_scaled = np.empty((len(test_df), 0))
+                train_num_scaled = np.empty((len(train_fold), 0))
+                test_num_scaled = np.empty((len(test_fold), 0))
 
             train_num_t = torch.tensor(train_num_scaled, dtype=torch.float32, device=self.device)
             train_cat_t = torch.tensor(train_cat_np, dtype=torch.long, device=self.device)
 
-            train_real_final = pd.concat([train_df[clean_num], train_df[all_cat_discrete]], axis=1).reset_index(
-                drop=True)
-            test_real_final = pd.concat([test_df[clean_num], test_df[all_cat_discrete]], axis=1).reset_index(drop=True)
-            num_synth = len(train_df)
+            train_real_final = pd.concat(
+                [train_fold[clean_num], train_fold[all_cat_discrete]], axis=1
+            ).reset_index(drop=True)
+            test_real_final = pd.concat(
+                [test_fold[clean_num], test_fold[all_cat_discrete]], axis=1
+            ).reset_index(drop=True)
+            num_synth = len(train_fold)
 
-            if self.model_type == 'csbm':
+            if self.model_type == "csbm":
                 synth_df_temp, elapsed_time = self._train_and_sample_csbm(
                     train_cat_t, fold_cardinalities, num_synth, all_cat_discrete, self.seed
                 )
@@ -103,9 +145,12 @@ class CrossValidator:
                 synth_num_scaled = np.zeros((num_synth, len(clean_num)))
             else:
                 ordered_cols = self._ordered_cols()
-                is_ordered_mask = torch.tensor([c in ordered_cols for c in all_cat_discrete], dtype=torch.bool)
+                is_ordered_mask = torch.tensor(
+                    [c in ordered_cols for c in all_cat_discrete], dtype=torch.bool
+                )
                 gen_num, gen_cat, elapsed_time = self._train_and_sample_msbm(
-                    train_num_t, train_cat_t, fold_cardinalities, is_ordered_mask, num_synth, self.seed
+                    train_num_t, train_cat_t, fold_cardinalities,
+                    is_ordered_mask, num_synth, self.seed,
                 )
                 synth_num_scaled = gen_num
                 synth_cat_np = gen_cat
@@ -125,44 +170,54 @@ class CrossValidator:
                     col_data = synth_cat_np[:, i].astype(int)
                     out_range = (col_data < 0) | (col_data >= len(cats))
 
-                    is_numeric = len(cats) > 0 and isinstance(cats[0], (int, float, np.integer, np.floating))
-                    ext_cats = np.array(cats + ([-999] if is_numeric else ["UNKNOWN_GEN"]),
-                                        dtype=object if not is_numeric else None)
+                    is_numeric = (
+                        len(cats) > 0
+                        and isinstance(cats[0], (int, float, np.integer, np.floating))
+                    )
+                    ext_cats = np.array(
+                        cats + ([-999] if is_numeric else ["UNKNOWN_GEN"]),
+                        dtype=object if not is_numeric else None,
+                    )
 
                     col_data[out_range] = len(cats)
                     synth_df[col] = ext_cats[col_data]
                     if is_numeric:
                         synth_df[col] = synth_df[col].astype(type(cats[0]))
 
-            synth_df = synth_df[train_real_final.columns]  # Восстанавливаем порядок
-            synth_cat_orig = synth_df[all_cat_discrete].values if all_cat_discrete else np.empty((num_synth, 0),
-                                                                                                 dtype=object)
+            synth_df = synth_df[train_real_final.columns]
+            synth_cat_orig = (
+                synth_df[all_cat_discrete].values
+                if all_cat_discrete
+                else np.empty((num_synth, 0), dtype=object)
+            )
 
             fold_data_dict = {
-                'test_num_scaled': test_num_scaled,
-                'clean_num_cols': clean_num,
-                'clean_discrete_cols': clean_disc,
-                'clean_pure_cat_cols': clean_cat,
-                'all_cat_discrete_cols': all_cat_discrete,
-                'test_real_df': test_real_final,
+                "test_num_scaled": test_num_scaled,
+                "clean_num_cols": clean_num,
+                "clean_discrete_cols": clean_disc,
+                "clean_pure_cat_cols": clean_cat,
+                "all_cat_discrete_cols": all_cat_discrete,
+                "test_real_df": test_real_final,
             }
 
-            fold_metrics = self._compute_metrics(fold_data_dict, synth_num_scaled, synth_cat_orig, synth_num_orig)
-            fold_metrics['fit_time'] = elapsed_time
+            fold_metrics = self._compute_metrics(
+                fold_data_dict, synth_num_scaled, synth_cat_orig, synth_num_orig
+            )
+            fold_metrics["fit_time"] = elapsed_time
 
             tstr_metrics = self._tstr_evaluate(
                 train_real_final, test_real_final, synth_df, all_cat_discrete, self.seed
             )
 
-            all_metrics = {**fold_metrics, **tstr_metrics, 'fold': fold_id}
+            all_metrics = {**fold_metrics, **tstr_metrics, "fold": fold_id}
             all_fold_results.append(all_metrics)
 
         df_results = pd.DataFrame(all_fold_results)
         mean_row = df_results.mean(numeric_only=True).to_dict()
-        mean_row['fold'] = 'mean'
+        mean_row["fold"] = "mean"
         df_results = pd.concat([df_results, pd.DataFrame([mean_row])], ignore_index=True)
-        df_results.insert(0, 'dataset', self.ds_name)
-        df_results.insert(1, 'model', self.model_type)
+        df_results.insert(0, "dataset", self.ds_name)
+        df_results.insert(1, "model", self.model_type)
 
         return df_results
 
@@ -190,7 +245,7 @@ class CrossValidator:
         sampler = DiscretePathSampler(timegrid, process)
         solver = CSBMSolver(updater, sampler, bp["num_outer_iterations"], bp["epochs"], bp["batch_size"])
 
-        g = torch.Generator(device=self.device).manual_seed(fold_seed)
+        g = torch.Generator(device="cpu").manual_seed(fold_seed)
         p1_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(train_tensor),
                                                 batch_size=bp["batch_size"], shuffle=True, generator=g)
         x_noise = self.create_noise_dataset(len(train_tensor), padded_cardinalities, self.device)
@@ -255,6 +310,14 @@ class CrossValidator:
         else:
             metrics['Continuous_Mean_WD'] = metrics['Continuous_Mean_KL_50bins'] = metrics['Continuous_Corr_Pearson'] = \
             metrics['mmd'] = np.nan
+
+        all_discrete_cat = clean_disc + clean_cat
+        if all_discrete_cat:
+            metrics['Discrete_Cat_Mean_KL'] = Metrics.average_kl_discrete(
+                test_real_df, synth_df, all_discrete_cat
+            )
+        else:
+            metrics['Discrete_Cat_Mean_KL'] = np.nan
 
         if clean_disc:
             metrics['Discrete_Mean_KL'] = Metrics.average_kl_discrete(test_real_df, synth_df, clean_disc)

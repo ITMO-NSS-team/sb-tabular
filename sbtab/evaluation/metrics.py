@@ -1,12 +1,13 @@
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 import numpy as np
 import optuna
 import pandas as pd
+from catboost import CatBoostRegressor, CatBoostClassifier
 from scipy.spatial.distance import jensenshannon
 from scipy.stats import entropy, wasserstein_distance
-from sklearn.metrics import normalized_mutual_info_score
+from sklearn.metrics import normalized_mutual_info_score, r2_score, f1_score
 from sklearn.metrics.pairwise import rbf_kernel
 
 class Metrics:
@@ -192,3 +193,74 @@ class Metrics:
 
         file_exists = Path("pruned_trials_params.csv").is_file()
         pd.DataFrame([params]).to_csv("pruned_trials_params.csv", mode='a', header=not file_exists, index=False)
+
+    @staticmethod
+    def evaluate_ml_efficacy(
+            train_real: pd.DataFrame,
+            test_real: pd.DataFrame,
+            train_synth: pd.DataFrame,
+            target_col: str,
+            task_type: str,
+            cat_features: Optional[List[str]] = None,
+            thread_count: int = -1
+    ) -> Dict[str, float]:
+        """Evaluates utility of synthetic data using the TSTR framework with CatBoost."""
+
+        if target_col is None or target_col not in train_real.columns:
+            if task_type == "classification":
+                return {"F1_real": np.nan, "F1_synth": np.nan, "delta_F1_abs": np.nan, "delta_F1_pct": np.nan}
+            return {"R2_real": np.nan, "R2_synth": np.nan, "delta_R2_abs": np.nan, "delta_R2_pct": np.nan}
+
+        X_real, y_real = Metrics.align_x_y(train_real.drop(columns=[target_col]), train_real[target_col])
+        X_synth, y_synth = Metrics.align_x_y(train_synth.drop(columns=[target_col]), train_synth[target_col])
+        X_test, y_test = Metrics.align_x_y(test_real.drop(columns=[target_col]), test_real[target_col])
+
+        if task_type == "classification":
+            y_real, y_synth, y_test = y_real.astype(str), y_synth.astype(str), y_test.astype(str)
+        else:
+            y_real, y_synth, y_test = y_real.astype(float), y_synth.astype(float), y_test.astype(float)
+
+        if cat_features is None:
+            cat_features = X_real.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
+
+        if cat_features:
+            for df in [X_real, X_synth, X_test]:
+                df[cat_features] = df[cat_features].astype(str)
+
+        cb_params = {"random_seed": 42, "verbose": 0, "thread_count": thread_count}
+
+        if task_type == "classification":
+            model_real = CatBoostClassifier(**cb_params, cat_features=cat_features).fit(X_real, y_real)
+            model_synth = CatBoostClassifier(**cb_params, cat_features=cat_features).fit(X_synth, y_synth)
+
+            score_real = f1_score(y_test, model_real.predict(X_test), average='macro')
+            score_synth = f1_score(y_test, model_synth.predict(X_test), average='macro')
+
+            pct_diff = ((score_real - score_synth) / max(abs(score_real), 1e-9)) * 100
+            return {
+                "F1_real": score_real,
+                "F1_synth": score_synth,
+                "delta_F1_abs": score_real - score_synth,
+                "delta_F1_pct": pct_diff
+            }
+
+        else:
+            model_real = CatBoostRegressor(**cb_params, cat_features=cat_features).fit(X_real, y_real)
+            model_synth = CatBoostRegressor(**cb_params, cat_features=cat_features).fit(X_synth, y_synth)
+
+            score_real = r2_score(y_test, model_real.predict(X_test))
+            score_synth = r2_score(y_test, model_synth.predict(X_test))
+
+            pct_diff = ((score_real - score_synth) / max(abs(score_real), 1e-9)) * 100
+            return {
+                "R2_real": score_real,
+                "R2_synth": score_synth,
+                "delta_R2_abs": score_real - score_synth,
+                "delta_R2_pct": pct_diff
+            }
+
+    @staticmethod
+    def align_x_y(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+        """Drops NaNs synchronously from features and target."""
+        combined = pd.concat([X, y.to_frame('__target__')], axis=1).dropna()
+        return combined.drop('__target__', axis=1), combined['__target__']
