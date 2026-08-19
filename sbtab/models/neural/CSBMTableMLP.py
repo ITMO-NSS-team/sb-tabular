@@ -14,7 +14,9 @@ class CSBMTableMLP(nn.Module):
             emb_dim: int = 16,
             hidden_dim: int = 256,
             time_dim: int = 64,
-            dropout: float = 0.0
+            dropout: float = 0.0,
+            sin_emb_max_period: float = 10_000.0,
+            sin_emb_learnable_scale: bool = False
     ) -> None:
         """
         Init of the MLP backbone module which is used for the CSBM solver.
@@ -26,6 +28,8 @@ class CSBMTableMLP(nn.Module):
             hidden_dim (int, optional): Dimension of the hidden layers in the MLP. Defaults to 256.
             time_dim (int, optional): Dimension of the time embeddings. Defaults to 64.
             dropout (float, optional): Dropout rate. Defaults to 0.0.
+            sin_emb_max_period (float, optional): Maximum period of the Sinusoidal time embeddings. Defaults to 10_000.
+            sin_emb_learnable_scale (float, optional): Learning scale of the Sinusoidal time embeddings. Defaults to False.
 
         Returns:
             None
@@ -35,7 +39,13 @@ class CSBMTableMLP(nn.Module):
         self.D = len(self.cardinalities)
         self.S_max = max(self.cardinalities)
         self.embs = nn.ModuleList([nn.Embedding(c, emb_dim) for c in self.cardinalities])
-        self.time_emb = SinusoidalTimeEmbedding(SinusoidalTimeEmbeddingConfig(dim=time_dim))
+        self.time_emb = SinusoidalTimeEmbedding(
+            SinusoidalTimeEmbeddingConfig(
+                dim=time_dim,
+                max_period=sin_emb_max_period,
+                learnable_scale=sin_emb_learnable_scale
+            )
+        )
 
         layers = []
         in_dim = self.D * emb_dim + time_dim

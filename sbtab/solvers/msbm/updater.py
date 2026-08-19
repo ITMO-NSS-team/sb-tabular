@@ -34,8 +34,8 @@ class MixedSBMUpdater:
         self.cfg = cfg
         self.has_cont = has_cont
         self.has_cat = has_cat
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
-        self.loss_fn = MixedSBMLoss(reference=ref_cat, lambda_num=cfg.lambda_num, lambda_cat=cfg.lambda_cat)
+        self.optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self.loss_fn = MixedSBMLoss(reference=ref_cat, lambda_num=cfg.lambda_num, lambda_cat=cfg.lambda_cat, ce_lambda=cfg.ce_lambda)
 
     def _make_training_tuple(
         self,

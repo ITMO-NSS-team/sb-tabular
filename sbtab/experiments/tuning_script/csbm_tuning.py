@@ -7,18 +7,15 @@ import pickle
 import random
 import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import optuna
 import torch
 from numpy import floating
+from sklearn.preprocessing import OrdinalEncoder
 
-from scipy.spatial.distance import jensenshannon
-from scipy.stats import entropy
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.metrics import r2_score, f1_score
 from torch.utils.data import DataLoader, TensorDataset
 
 from sbtab.bridge.losses import CSBMLoss
@@ -26,85 +23,14 @@ from sbtab.bridge.pathsampler import DiscretePathSampler
 from sbtab.bridge.reference import CategoricalReference
 from sbtab.bridge.timegrid import TimeGrid
 from sbtab.data.datamodule import TabularDataModule
-from sbtab.data.schema import TabularSchema
+from sbtab.data.schema import TabularSchema, classify_feature_type
 from sbtab.data.splits import SplitConfigHoldout
+from sbtab.evaluation import Metrics
 from sbtab.models.neural.CSBMTableMLP import CSBMTableMLP
 from sbtab.solvers.csbm import CSBMUpdater, CSBMSolver
+from sbtab.transforms.drop_cols import DropDataCols
 from sbtab.transforms.missing import DropMissingRows
 from sbtab.transforms.pipeline import TransformPipeline
-
-
-def get_distributions(real: pd.Series, synth: pd.Series):
-    """Aligns categories and returns probability distributions."""
-    cats = list(set(real.dropna().unique()) | set(synth.dropna().unique()))
-    p = real.value_counts(normalize=True).reindex(cats, fill_value=1e-9).values
-    q = synth.value_counts(normalize=True).reindex(cats, fill_value=1e-9).values
-    return p, q
-
-def average_kl(real: pd.DataFrame, synth: pd.DataFrame, cols: List[str]) -> float:
-    if not cols: return 0.0
-    kls = []
-    for c in cols:
-        p, q = get_distributions(real[c], synth[c])
-        kls.append(float(entropy(p, q)))
-    return float(np.mean(kls))
-
-def correlation_distance(real: pd.DataFrame, synth: pd.DataFrame) -> float:
-    if real.empty or synth.empty:
-        return 0.0
-
-    corr_real_df = real.astype(float).corr(method="spearman").fillna(0)
-    corr_real_arr = corr_real_df.values.copy()
-    np.fill_diagonal(corr_real_arr, 1.0)
-    corr_real = corr_real_arr
-
-    corr_synth_df = synth.astype(float).corr(method="spearman").fillna(0)
-    corr_synth_arr = corr_synth_df.values.copy()
-    np.fill_diagonal(corr_synth_arr, 1.0)
-    corr_synth = corr_synth_arr
-
-    return float(np.linalg.norm(corr_real - corr_synth, ord='fro'))
-
-def evaluate_ml_efficacy(train_real: pd.DataFrame,
-                         test_real: pd.DataFrame,
-                         train_synth: pd.DataFrame,
-                         target_col: str,
-                         task_type: str) -> dict:
-    """Trains a model on Real vs Synth and evaluates on Real Test."""
-    X_real = train_real.drop(columns=[target_col]).fillna(0)
-    y_real = train_real[target_col].fillna(0)
-    X_synth = train_synth.drop(columns=[target_col]).fillna(0)
-    y_synth = train_synth[target_col].fillna(0)
-    X_test = test_real.drop(columns=[target_col]).fillna(0)
-    y_test = test_real[target_col].fillna(0)
-
-    if task_type == "classification":
-        model_real = RandomForestClassifier(random_state=42).fit(X_real, y_real)
-        model_synth = RandomForestClassifier(random_state=42).fit(X_synth, y_synth)
-        score_real = f1_score(y_test, model_real.predict(X_test), average='weighted')
-        score_synth = f1_score(y_test, model_synth.predict(X_test), average='weighted')
-        return {"F1_real": score_real, "F1_synth": score_synth, "diff": score_real - score_synth}
-    else:
-        model_real = RandomForestRegressor(random_state=42).fit(X_real, y_real)
-        model_synth = RandomForestRegressor(random_state=42).fit(X_synth, y_synth)
-        score_real = r2_score(y_test, model_real.predict(X_test))
-        score_synth = r2_score(y_test, model_synth.predict(X_test))
-        return {"R2_real": score_real, "R2_synth": score_synth, "diff": score_real - score_synth}
-
-def mean_js(real: pd.DataFrame, synth: pd.DataFrame, cardinalities: list[int]) -> floating[Any]:
-    js = np.zeros(shape=real.shape[1])
-    for idx, col in enumerate(real.columns):
-        card = cardinalities[idx]
-
-        p = np.bincount(real[col].astype(int), minlength=card)
-        q = np.bincount(synth[col].astype(int), minlength=card)
-
-        p = p / p.sum() if p.sum() > 0 else p
-        q = q / q.sum() if q.sum() > 0 else q
-
-        js[idx] = jensenshannon(p, q)
-
-    return np.mean(js)
 
 def export_trials_csv(study: optuna.Study, out_csv: Path) -> None:
     """Export all trials to CSV for offline analysis."""
@@ -151,73 +77,53 @@ def seed_everything(seed: int) -> None:
     elif hasattr(torch, "set_deterministic_debug_mode"):
         torch.set_deterministic_debug_mode(1)
 
-def make_csbm_objective(train_df, val_df, ds_name, seed, device):
+def make_csbm_objective(train_cat_t, val_cat_np, cardinalities, order_mask, ds_name, seed, device):
     seed_everything(seed)
-
-    cols = list(train_df.columns)
-    cardinalities = [int(train_df[c].max() + 1) for c in cols]
-
-    order_dict = {
-        "Mushroom": ['ring-number', 'gill-spacing', 'gill-size'],
-        "Car Evaluation": ['buying', 'maint', 'doors', 'persons', 'lug_boot', 'safety'],
-        "Student Perf": ['age', 'failures', 'absences', 'G1', 'G2', 'G3', 'Medu', 'Fedu', 'traveltime', 'studytime',
-                         'famrel', 'freetime', 'goout', 'Dalc', 'Walc', 'health'],
-        "Lymphography": ['lym_nodes_enlar', 'no_of_nodes_in', 'lym_nodes_dimin'],
-        "Breast cancer": ['age', 'tumor_size', 'inv_nodes', 'deg-malig']
-    }
-
-    ordered_cols_for_ds = order_dict.get(ds_name, [])
-
-    order_mask = torch.tensor([c in ordered_cols_for_ds for c in cols], dtype=torch.bool)
-
-    train_tensor = torch.tensor(train_df.values, dtype=torch.long, device=device)
+    train_tensor = train_cat_t
 
     def objective(trial: optuna.trial.Trial) -> floating[Any] | float:
         # Hyperparams
+        emb_dim = trial.suggest_int("emb_dim", 8, 32)
+        hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512])
+        time_dim = trial.suggest_int("time_dim", 32, 128, step=32)
+        n_layers = trial.suggest_int("n_layers", 2, 6)
+        dropout = trial.suggest_float("dropout", 0.01, 0.3)
 
-        # Model params
-        emb_dim = trial.suggest_int("emb_dim", 32, 1024, log=True)
-        hidden_dim = trial.suggest_int("hidden_dim", 32, 1024, log=True)
-        time_dim = trial.suggest_int("time_dim", 16, 128, step=16)
-
-        # Solver's params
+        # Solver Params
         steps = trial.suggest_int("steps", 20, 100, step=10)
-        num_outer_iterations = trial.suggest_int("num_outer_iterations", 5, 70)
-        epochs = trial.suggest_int("epochs", 5, 30)
-        batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
+        num_outer_iterations = trial.suggest_int("num_outer_iterations", 2, 10)
+        epochs = trial.suggest_int("epochs", 5, 20)
+        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512])
 
         # Optimization
-        fw_lr = trial.suggest_float("forward_lr", 1e-4, 5e-3, log=True)
-        bw_lr = trial.suggest_float("backward_lr", 1e-4, 5e-3, log=True)
-
-        # Regularization
+        fw_lr = trial.suggest_float("forward_lr", 1e-4, 2e-3, log=True)
+        bw_lr = trial.suggest_float("backward_lr", 1e-4, 2e-3, log=True)
         fw_decay = trial.suggest_float("forward_weight_decay", 1e-6, 1e-3, log=True)
         bw_decay = trial.suggest_float("backward_weight_decay", 1e-6, 1e-3, log=True)
 
-        # CSBM Specific
-        loss_lmbda = trial.suggest_float("loss_lambda", 0.01, 1.0, step=0.01)
-        alpha = trial.suggest_float("alpha", 0.001, 0.1, step=0.001)
+        # CSBM Parameters
+        loss_lmbda = trial.suggest_float("loss_lambda", 0.01, 1.0)
+        alpha = trial.suggest_float("alpha", 0.01, 1.0)
 
         # Determined params
         timegrid = TimeGrid(num_steps=steps)
 
-        total_number_of_q_powers = steps
-
-        max_card = max(cardinalities)
-        padded_cardinalities = [max_card] * len(cardinalities)
-
         fw_model = CSBMTableMLP(
-            cardinalities=padded_cardinalities,
+            cardinalities=cardinalities,
+            n_layers=n_layers,
             emb_dim=emb_dim,
             hidden_dim=hidden_dim,
-            time_dim=time_dim
+            time_dim=time_dim,
+            dropout=dropout
         ).to(device)
 
         bw_model = CSBMTableMLP(
-            cardinalities=padded_cardinalities,
+            cardinalities=cardinalities,
+            n_layers=n_layers,
             emb_dim=emb_dim,
             hidden_dim=hidden_dim,
-            time_dim=time_dim
+            time_dim=time_dim,
+            dropout=dropout
         ).to(device)
 
         fw_opt = torch.optim.Adam(fw_model.parameters(), lr=fw_lr, weight_decay=fw_decay)
@@ -227,7 +133,7 @@ def make_csbm_objective(train_df, val_df, ds_name, seed, device):
         process = CategoricalReference(
             cardinalities,
             is_ordered=order_mask,
-            total_number_of_q_powers=total_number_of_q_powers,
+            total_number_of_q_powers=steps,
             alpha=alpha,
             device=device
         )
@@ -256,12 +162,12 @@ def make_csbm_objective(train_df, val_df, ds_name, seed, device):
             g.manual_seed(seed)
 
             p1_loader = DataLoader(TensorDataset(train_tensor), batch_size=batch_size, shuffle=True, generator=g)
-            x_noise = create_noise_dataset(len(train_df), cardinalities, device)
+            x_noise = create_noise_dataset(len(train_cat_t), cardinalities, device)
             p0_loader = DataLoader(TensorDataset(x_noise), batch_size=batch_size, shuffle=True, generator=g)
 
             solver.fit(p1_loader, p0_loader)
 
-            num_gen = len(train_df)
+            num_gen = val_cat_np.shape[0]
             z_noise = create_noise_dataset(num_gen, cardinalities, device)
 
             synth_data, _ = sampler.simulate(
@@ -270,13 +176,24 @@ def make_csbm_objective(train_df, val_df, ds_name, seed, device):
                 direction="forward"
             )
 
-            return mean_js(val_df, pd.DataFrame(synth_data.cpu().numpy(), columns=val_df.columns), cardinalities)
+            return Metrics.compute_jensenshannon_optuna(val_cat_np, synth_data.cpu().numpy(), cardinalities, trial, seed, ds_name, device)
 
         except Exception as e:
             print(e)
             return float("inf")
 
     return objective
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """Encodes NumPy types for JSON serialization."""
+
+    def default(self, obj):
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        return super().default(obj)
+
 
 if __name__ == "__main__":
     seed = 5
@@ -288,8 +205,8 @@ if __name__ == "__main__":
     ap.add_argument("--pickle", type=str, default="../../data/datasets/datasets_categorical.pkl")
     ap.add_argument("--datasets", type=str, default="all")
     ap.add_argument("--test-size", type=float, default=0.2)
-    ap.add_argument("--device", type=str, default="cuda")
-    ap.add_argument("--n-trials", type=int, default=50)
+    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--n-trials", type=int, default=10)
     ap.add_argument("--outdir", type=str, default="csbm_optuna_results")
     args = ap.parse_args()
 
@@ -302,72 +219,58 @@ if __name__ == "__main__":
                                                                                 args.datasets.split(",")]
 
     sampler = optuna.samplers.TPESampler(seed=seed)
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=7, n_warmup_steps=2)
-
     for ds_name in dataset_keys:
         print(f"\n{'=' * 80}\nDataset: {ds_name}\n{'=' * 80}")
-        df_raw = my_data[ds_name].copy()
+        if ds_name == "Student Perf":
+            continue
+        df_raw = my_data[ds_name]
+
         target_col = df_raw.attrs.get('target_variable')
         task_type = df_raw.attrs.get('task_type', 'classification')
 
-        for col in df_raw.columns:
-            dtype_str = str(df_raw[col].dtype).lower()
-            if 'object' in dtype_str or 'category' in dtype_str or 'str' in dtype_str:
-                df_raw[col] = df_raw[col].astype(str).astype('category')
-            else:
-                df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0)
-
         schema = TabularSchema.infer_from_dataframe(df_raw, target_col=target_col)
-        dm = TabularDataModule(df=df_raw, schema=schema, transforms=TransformPipeline(transforms=[DropMissingRows()]))
-
+        dm = TabularDataModule(df=df_raw, schema=schema,
+                               transforms=TransformPipeline(transforms=[DropMissingRows(), DropDataCols()]))
         dm.prepare_holdout(SplitConfigHoldout(val_size=args.test_size, shuffle=True, random_state=seed))
-        holdout = dm.get_holdout()
 
-        train_df = holdout.train.copy()
-        val_df = holdout.val.copy()
+        train_df = dm.get_holdout().train.copy()
+        val_df = dm.get_holdout().val.copy()
 
-        cols_to_factorize = list(schema.categorical_cols)
-        if schema.target_col and train_df[schema.target_col].dtype in ['object', 'category', 'str']:
-            cols_to_factorize.append(schema.target_col)
+        cat_cols = list(schema.categorical_cols)
+        discrete_cols = list(schema.discrete_cols)
 
-        for col in cols_to_factorize:
-            train_df[col], uniques = pd.factorize(train_df[col])
-            val_mapper = {val: i for i, val in enumerate(uniques)}
-            val_df[col] = val_df[col].map(val_mapper).fillna(0)
-
-        train_df = train_df.astype(int)
-        val_df = val_df.astype(int)
+        if target_col:
+            target_col_type = classify_feature_type(train_df[target_col])
+            if target_col_type == "discrete":
+                discrete_cols.append(target_col)
+            elif target_col_type == "categorical":
+                cat_cols.append(target_col)
+            else:
+                raise ValueError("Target column type not recognized for purely categorical/discrete CSBM setup")
 
         bad_cols = [c for c in train_df.columns if train_df[c].nunique() <= 1]
         if bad_cols:
             print(f"Dropping constant columns: {bad_cols}")
-            print(train_df[bad_cols].head(), val_df[bad_cols].head())
             train_df = train_df.drop(columns=bad_cols)
             val_df = val_df.drop(columns=bad_cols)
+            cat_cols = [c for c in cat_cols if c not in bad_cols]
+            discrete_cols = [c for c in discrete_cols if c not in bad_cols]
 
-        study = optuna.create_study(direction="minimize", sampler=sampler, pruner=pruner)
-        objective = make_csbm_objective(train_df, val_df, ds_name, seed, args.device)
+        all_cat_discrete_cols = cat_cols + discrete_cols
+        true_train_eval_df = train_df[all_cat_discrete_cols].copy()
+        true_val_eval_df = val_df[all_cat_discrete_cols].copy()
 
-        start_time = time.time()
+        if all_cat_discrete_cols:
+            global_encoder = OrdinalEncoder(dtype=np.int64, handle_unknown='use_encoded_value', unknown_value=-1)
+            global_encoder.fit(train_df[all_cat_discrete_cols])
 
-        try:
-            study.optimize(objective, n_trials=args.n_trials, gc_after_trial=True, show_progress_bar=True)
-        except Exception as e:
-            print(f"Error during study: {e}")
-            continue
+            train_cat_np = global_encoder.transform(train_df[all_cat_discrete_cols])
+            val_cat_np = global_encoder.transform(val_df[all_cat_discrete_cols])
 
-        elapsed_sec = time.time() - start_time
-
-        best = study.best_trial
-        bp = best.params
-
-        print(f"\n--- Best trial results ({ds_name}) ---")
-        print(f"Best Loss (Mean JS): {best.value}")
-
-        print(f"\n--- Computing final experiments for {ds_name} ---")
-
-        cols = list(train_df.columns)
-        cardinalities = [int(train_df[c].max() + 1) for c in cols]
+            cat_categories = {col: list(global_encoder.categories_[i]) for i, col in enumerate(all_cat_discrete_cols)}
+            cardinalities = [len(cat_categories[col]) for col in all_cat_discrete_cols]
+        else:
+            raise ValueError("No categorical or discrete columns found for CSBM.")
 
         order_dict = {
             "Mushroom": ['ring-number', 'gill-spacing', 'gill-size'],
@@ -377,27 +280,61 @@ if __name__ == "__main__":
             "Lymphography": ['lym_nodes_enlar', 'no_of_nodes_in', 'lym_nodes_dimin'],
             "Breast cancer": ['age', 'tumor_size', 'inv_nodes', 'deg-malig']
         }
+        ordered_cols_ds = order_dict.get(ds_name, [])
+        order_mask = torch.tensor([c in ordered_cols_ds for c in cat_cols] + [True] * len(discrete_cols),
+                                  dtype=torch.bool)
 
-        ordered_cols_final = order_dict.get(ds_name, [])
-        order_mask = torch.tensor([c in ordered_cols_final for c in cols], dtype=torch.bool)
+        train_cat_t = torch.tensor(train_cat_np, dtype=torch.long, device=args.device)
+
+        study = optuna.create_study(
+            study_name=f"csbm_study_{ds_name}",
+            storage=f"sqlite:///{outdir}/csbm_optuna.db",
+            load_if_exists=True,
+            direction="minimize",
+            sampler=sampler
+        )
+
+        start_time = time.time()
+        try:
+            study.optimize(
+                make_csbm_objective(train_cat_t, val_cat_np, cardinalities, order_mask, ds_name, seed, args.device),
+                n_trials=args.n_trials,
+                gc_after_trial=True,
+                show_progress_bar=True
+            )
+        except Exception as e:
+            print(f"Error during study: {e}")
+            continue
+
+        elapsed_sec = time.time() - start_time
+        export_trials_csv(study, outdir / f"{ds_name}_trials.csv")
+
+        best = study.best_trial
+        bp = best.params
+
+        print(f"\n--- Best trial results ({ds_name}) ---")
+        print(f"Best Loss (Mean JS): {best.value}")
+
+        print(f"\n--- Computing final experiments for {ds_name} ---")
 
         timegrid = TimeGrid(num_steps=bp["steps"])
 
-        max_card = max(cardinalities)
-        padded_cardinalities = [max_card] * len(cardinalities)
-
         fw_model = CSBMTableMLP(
-            cardinalities=padded_cardinalities,
+            cardinalities=cardinalities,
             emb_dim=bp["emb_dim"],
             hidden_dim=bp["hidden_dim"],
-            time_dim=bp["time_dim"]
+            time_dim=bp["time_dim"],
+            n_layers=bp["n_layers"],
+            dropout=bp["dropout"]
         ).to(args.device)
 
         bw_model = CSBMTableMLP(
-            cardinalities=padded_cardinalities,
+            cardinalities=cardinalities,
             emb_dim=bp["emb_dim"],
             hidden_dim=bp["hidden_dim"],
-            time_dim=bp["time_dim"]
+            time_dim=bp["time_dim"],
+            n_layers=bp["n_layers"],
+            dropout=bp["dropout"]
         ).to(args.device)
 
         fw_opt = torch.optim.Adam(fw_model.parameters(), lr=bp["forward_lr"], weight_decay=bp["forward_weight_decay"])
@@ -425,44 +362,70 @@ if __name__ == "__main__":
             epochs=bp["epochs"], batch_size=bp["batch_size"]
         )
 
-        train_tensor = torch.tensor(train_df.values, dtype=torch.long, device=args.device)
-        final_p1_loader = DataLoader(TensorDataset(train_tensor), batch_size=bp["batch_size"], shuffle=True,
-                                     generator=g)
-
+        final_p1_loader = DataLoader(TensorDataset(train_cat_t), batch_size=bp["batch_size"], shuffle=True, generator=g)
         final_x_noise = create_noise_dataset(len(train_df), cardinalities, args.device)
         final_p0_loader = DataLoader(TensorDataset(final_x_noise), batch_size=bp["batch_size"], shuffle=True,
                                      generator=g)
 
         final_solver.fit(final_p1_loader, final_p0_loader)
 
-        # To avoid bias in synthetic distribution generate the number of samples equal to val_df len.
-        num_gen = len(val_df)
-        noise_final = create_noise_dataset(num_gen, cardinalities, args.device)
 
-        x_synth_tensor, _ = sampler_ds.simulate(
-            x_init=noise_final,
+        def tensors_to_dataframe(g_cat, n_samples):
+            """Inverse transforms tensors back into a Pandas DataFrame."""
+            s_df = pd.DataFrame(index=range(n_samples))
+            if all_cat_discrete_cols and g_cat is not None:
+                g_cat_np = g_cat.cpu().numpy()
+                for i, col in enumerate(all_cat_discrete_cols):
+                    cats = cat_categories[col]
+                    col_data = g_cat_np[:, i].astype(int)
+                    out_range = (col_data < 0) | (col_data >= len(cats))
+
+                    is_numeric = len(cats) > 0 and isinstance(cats[0], (int, float, np.integer, np.floating))
+                    ext_cats = np.array(cats + ([-999] if is_numeric else ["UNKNOWN_GEN"]),
+                                        dtype=object if not is_numeric else None)
+
+                    col_data[out_range] = len(cats)
+                    s_df[col] = ext_cats[col_data]
+
+                    original_dtype = true_train_eval_df[col].dtype
+                    try:
+                        s_df[col] = s_df[col].astype(original_dtype)
+                    except (ValueError, TypeError):
+                        pass
+
+            return s_df[all_cat_discrete_cols]
+
+
+        noise_val = create_noise_dataset(len(val_df), cardinalities, args.device)
+        x_synth_val_tensor, _ = sampler_ds.simulate(
+            x_init=noise_val,
             model=fw_model,
             direction="forward"
         )
+        synth_val_df = tensors_to_dataframe(x_synth_val_tensor, len(val_df))
 
-        synth_df = pd.DataFrame(x_synth_tensor.cpu().numpy(), columns=train_df.columns)
-
-        final_kl = average_kl(val_df, synth_df, list(synth_df.columns))
-        corr_dist = correlation_distance(val_df, synth_df)
-
-        # Here generate new synthetic for evaluate_ml_efficiency function so that
-        # RF could learn on a proper amount of data that's why we choose len(train_df) number of samples.
-        noise_for_ml_eff = create_noise_dataset(len(train_df), cardinalities, args.device)
-
-        x_synth_tensor, _ = sampler_ds.simulate(
-            x_init=noise_for_ml_eff,
+        noise_train = create_noise_dataset(len(train_df), cardinalities, args.device)
+        x_synth_train_tensor, _ = sampler_ds.simulate(
+            x_init=noise_train,
             model=fw_model,
             direction="forward"
         )
+        synth_train_df = tensors_to_dataframe(x_synth_train_tensor, len(train_df))
 
-        synth_df = pd.DataFrame(x_synth_tensor.cpu().numpy(), columns=train_df.columns)
+        discrete_present = [c for c in discrete_cols if c in true_val_eval_df.columns and c not in bad_cols]
+        pure_cat_cols = [c for c in cat_cols if c in true_val_eval_df.columns and c not in bad_cols]
 
-        ml_eff = evaluate_ml_efficacy(train_df, val_df, synth_df, target_col, task_type)
+        final_kl = Metrics.average_kl_discrete(true_val_eval_df, synth_val_df, pure_cat_cols) if pure_cat_cols else None
+
+        corr_dist = Metrics.compute_corr_distance_for_columns(
+            true_val_eval_df, synth_val_df, discrete_present, method="spearman"
+        ) if discrete_present else None
+
+        ml_eff = Metrics.evaluate_ml_efficacy(
+            train_real=true_train_eval_df, test_real=true_val_eval_df,
+            train_synth=synth_train_df,
+            target_col=target_col, task_type=task_type
+        )
 
         results = {
             "dataset": ds_name,
@@ -473,9 +436,18 @@ if __name__ == "__main__":
             "best_params": bp,
             "Best_Tuning_Loss_JS": best.value,
             "Final_Mean_KL": final_kl,
-            "Corr_Distance": corr_dist,
+            "Corr_Distance_Discrete_Spearman": corr_dist,
             **ml_eff
         }
 
-        print(json.dumps(results, indent=4))
-        (outdir / f"{ds_name}_final_metrics.json").write_text(json.dumps(results, indent=4))
+        print(json.dumps(results, indent=4, cls=NumpyEncoder))
+        (outdir / f"{ds_name}_final_metrics.json").write_text(json.dumps(results, indent=4, cls=NumpyEncoder))
+
+        train_pkl_path = outdir / f"{ds_name}_train.pkl"
+        test_pkl_path = outdir / f"{ds_name}.test.pkl"
+
+        with open(train_pkl_path, "wb") as f:
+            pickle.dump(true_train_eval_df, f)
+
+        with open(test_pkl_path, "wb") as f:
+            pickle.dump(true_val_eval_df, f)

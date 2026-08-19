@@ -8,14 +8,11 @@ import pickle
 import random
 import time
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List
 
 import numpy as np
 import optuna
 import pandas as pd
 import torch
-from catboost import CatBoostClassifier, CatBoostRegressor
-from sklearn.metrics import f1_score, r2_score
 from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 
 from sbtab.data.datamodule import TabularDataModule
@@ -39,75 +36,6 @@ def seed_everything(seed: int) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
-def evaluate_ml_efficacy(
-        train_real: pd.DataFrame,
-        test_real: pd.DataFrame,
-        train_synth: pd.DataFrame,
-        target_col: str,
-        task_type: str,
-        cat_features: Optional[List[str]] = None,
-        thread_count: int = -1
-) -> Dict[str, float]:
-    """Evaluates utility of synthetic data using the TSTR framework with CatBoost."""
-
-    if target_col is None or target_col not in train_real.columns:
-        if task_type == "classification":
-            return {"F1_real": np.nan, "F1_synth": np.nan, "delta_F1_abs": np.nan, "delta_F1_pct": np.nan}
-        return {"R2_real": np.nan, "R2_synth": np.nan, "delta_R2_abs": np.nan, "delta_R2_pct": np.nan}
-
-    X_real, y_real = align_x_y(train_real.drop(columns=[target_col]), train_real[target_col])
-    X_synth, y_synth = align_x_y(train_synth.drop(columns=[target_col]), train_synth[target_col])
-    X_test, y_test = align_x_y(test_real.drop(columns=[target_col]), test_real[target_col])
-
-    if task_type == "classification":
-        y_real, y_synth, y_test = y_real.astype(str), y_synth.astype(str), y_test.astype(str)
-    else:
-        y_real, y_synth, y_test = y_real.astype(float), y_synth.astype(float), y_test.astype(float)
-
-    if cat_features is None:
-        cat_features = X_real.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
-
-    if cat_features:
-        for df in [X_real, X_synth, X_test]:
-            df[cat_features] = df[cat_features].astype(str)
-
-    cb_params = {"random_seed": 42, "verbose": 0, "thread_count": thread_count}
-
-    if task_type == "classification":
-        model_real = CatBoostClassifier(**cb_params, cat_features=cat_features).fit(X_real, y_real)
-        model_synth = CatBoostClassifier(**cb_params, cat_features=cat_features).fit(X_synth, y_synth)
-
-        score_real = f1_score(y_test, model_real.predict(X_test), average='macro')
-        score_synth = f1_score(y_test, model_synth.predict(X_test), average='macro')
-
-        pct_diff = ((score_real - score_synth) / max(abs(score_real), 1e-9)) * 100
-        return {
-            "F1_real": score_real,
-            "F1_synth": score_synth,
-            "delta_F1_abs": score_real - score_synth,
-            "delta_F1_pct": pct_diff
-        }
-
-    else:
-        model_real = CatBoostRegressor(**cb_params, cat_features=cat_features).fit(X_real, y_real)
-        model_synth = CatBoostRegressor(**cb_params, cat_features=cat_features).fit(X_synth, y_synth)
-
-        score_real = r2_score(y_test, model_real.predict(X_test))
-        score_synth = r2_score(y_test, model_synth.predict(X_test))
-
-        pct_diff = ((score_real - score_synth) / max(abs(score_real), 1e-9)) * 100
-        return {
-            "R2_real": score_real,
-            "R2_synth": score_synth,
-            "delta_R2_abs": score_real - score_synth,
-            "delta_R2_pct": pct_diff
-        }
-
-def align_x_y(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    """Drops NaNs synchronously from features and target."""
-    combined = pd.concat([X, y.to_frame('__target__')], axis=1).dropna()
-    return combined.drop('__target__', axis=1), combined['__target__']
-
 def make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, cardinalities, is_ordered, seed, device,
                         ds_name):
     """Optuna objective builder for MSBM."""
@@ -124,14 +52,21 @@ def make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, cardin
         steps = trial.suggest_int("num_steps", 20, 100, step=10)
         sigma = trial.suggest_float("sigma", 0.01, 1.0)
         alpha = trial.suggest_float("alpha", 0.01, 1.0)
+        eps = trial.suggest_float("eps", 1e-4, 5e-3, log=True)
+
         lambda_num = trial.suggest_float("lambda_num", 0.1, 1.0)
         lambda_cat = trial.suggest_float("lambda_cat", 0.1, 1.0)
+        ce_lmbda = trial.suggest_float("ce_lambda", 0.01, 1.0)
+
+        noise = trial.suggest_categorical("noise", [True, False])
         imf_len = trial.suggest_int("imf_len", 3, 9, step=2)
         fb_sequence = tuple("b" if i % 2 == 0 else "f" for i in range(imf_len))
 
         lr = trial.suggest_float("lr", 1e-4, 2e-3, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512])
         epochs = trial.suggest_int("epochs_per_direction", 5, 20)
+
         grad_clip = trial.suggest_float("grad_clip", 0.1, 1.0)
         dropout = trial.suggest_float("dropout", 0.01, 0.3)
 
@@ -141,11 +76,15 @@ def make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, cardin
             time_dim=time_dim,
             n_layers=n_layers,
             dropout=dropout,
+            weight_decay=weight_decay,
             num_steps=steps,
             sigma=sigma,
             alpha=alpha,
+            eps=eps,
             lambda_num=lambda_num,
             lambda_cat=lambda_cat,
+            ce_lambda=ce_lmbda,
+            noise=noise,
             lr=lr,
             batch_size=batch_size,
             epochs_per_direction=epochs,
@@ -212,7 +151,7 @@ if __name__ == "__main__":
     ap.add_argument("--datasets", type=str, default="all")
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--n-trials", type=int, default=0)
+    ap.add_argument("--n-trials", type=int, default=60)
     ap.add_argument("--outdir", type=str, default="msbm_optuna_results")
     args = ap.parse_args()
 
@@ -337,12 +276,27 @@ if __name__ == "__main__":
             print(f"\nTrying trial ranking {trial_idx + 1} (Trial {best_trial.number}) with value: {best_trial.value}")
 
             final_cfg = MixedSBMConfig(
-                cat_emb_dim=bp["cat_emb_dim"], hidden_dim=bp["hidden_dim"], time_dim=bp["time_dim"],
-                n_layers=bp["n_layers"], num_steps=bp["num_steps"], sigma=bp["sigma"], alpha=bp["alpha"],
-                grad_clip=bp["grad_clip"], fb_sequence=tuple("b" if i % 2 == 0 else "f" for i in range(bp["imf_len"])),
-                dropout=bp["dropout"], lambda_num=bp["lambda_num"], lambda_cat=bp["lambda_cat"],
-                lr=bp["lr"], batch_size=bp["batch_size"], epochs_per_direction=bp["epochs_per_direction"],
-                device=args.device, seed=seed + best_trial.number
+                cat_emb_dim=bp["cat_emb_dim"],
+                hidden_dim=bp["hidden_dim"],
+                time_dim=bp["time_dim"],
+                n_layers=bp["n_layers"],
+                num_steps=bp["num_steps"],
+                sigma=bp["sigma"],
+                alpha=bp["alpha"],
+                eps=bp["eps"],
+                ce_lambda=bp["ce_lambda"],
+                grad_clip=bp["grad_clip"],
+                fb_sequence=tuple("b" if i % 2 == 0 else "f" for i in range(bp["imf_len"])),
+                dropout=bp["dropout"],
+                lambda_num=bp["lambda_num"],
+                lambda_cat=bp["lambda_cat"],
+                weight_decay=bp["weight_decay"],
+                noise=bp["noise"],
+                lr=bp["lr"],
+                batch_size=bp["batch_size"],
+                epochs_per_direction=bp["epochs_per_direction"],
+                device=args.device,
+                seed=seed + best_trial.number
             )
 
             final_solver = MixedSBMSolver(continuous_dim=train_num_t.shape[1], cardinalities=cardinalities,
@@ -391,7 +345,7 @@ if __name__ == "__main__":
             return s_df[train_df.columns]
 
 
-        ml_eff = evaluate_ml_efficacy(
+        ml_eff = Metrics.evaluate_ml_efficacy(
             train_real=true_train_eval_df, test_real=true_val_eval_df,
             train_synth=tensors_to_dataframe(gen_num_train, gen_cat_train, len(train_df)),
             target_col=target_col, task_type=task_type
@@ -401,6 +355,8 @@ if __name__ == "__main__":
         pure_cat_cols = [c for c in cat_cols if c in true_val_eval_df.columns and c not in bad_cols]
         num_present = [c for c in num_cols if c in true_val_eval_df.columns and c not in bad_cols]
         synth_val_df = tensors_to_dataframe(gen_num_val, gen_cat_val, len(val_df))
+
+        all_cat_discrete_eval = [c for c in (discrete_present + pure_cat_cols) if c in true_val_eval_df.columns]
 
         results = {
             "dataset": ds_name,
@@ -421,6 +377,9 @@ if __name__ == "__main__":
                                                                         method='spearman') if discrete_present else None,
             "Categorical_Mean_KL": Metrics.average_kl_discrete(true_val_eval_df, synth_val_df,
                                                        pure_cat_cols) if pure_cat_cols else None,
+            "Discrete_Cat_Mean_KL": Metrics.average_kl_discrete(
+                true_val_eval_df, synth_val_df, all_cat_discrete_eval
+            ) if all_cat_discrete_eval else None,
             "Categorical_NMI": Metrics.compute_nmi_distance_matrix(true_val_eval_df, synth_val_df,
                                                            pure_cat_cols) if pure_cat_cols else None,
             "MMD": Metrics.compute_mmd_numpy(val_num_np, gen_num_val.cpu().numpy(), seed=seed) if num_cols else None,
@@ -429,3 +388,12 @@ if __name__ == "__main__":
 
         print(json.dumps(results, indent=4, cls=NumpyEncoder))
         (outdir / f"{ds_name}_final_metrics.json").write_text(json.dumps(results, indent=4, cls=NumpyEncoder))
+
+        train_pkl_path = outdir / f"{ds_name}_train.pkl"
+        test_pkl_path = outdir / f"{ds_name}.test.pkl"
+
+        with open(train_pkl_path, "wb") as f:
+            pickle.dump(true_train_eval_df, f)
+
+        with open(test_pkl_path, "wb") as f:
+            pickle.dump(true_val_eval_df, f)

@@ -45,16 +45,24 @@ class MixedSBMSolver:
         if not self.has_cont and not self.has_cat:
             raise ValueError("There is no data to process.")
 
-        self.ref_gauss = GaussianReference(dim=continuous_dim, device=self.device) if self.has_cont else None
+        self.ref_gauss = GaussianReference(
+            dim=continuous_dim,
+            mean=cfg.num_ref_mean,
+            std=cfg.num_ref_std,
+            device=self.device,
+            dtype=cfg.num_dtype
+        ) if self.has_cont else None
+
         self.ref_cat = CategoricalReference(
             cardinalities=cardinalities,
             is_ordered=is_ordered,
             total_number_of_q_powers=cfg.num_steps,
             alpha=cfg.alpha,
-            device=self.device
+            device=self.device,
+            dtype=cfg.cat_dtype
         ) if self.has_cat else None
 
-        self.integrator = EulerMaruyama(noise=True, sigma=cfg.sigma) if self.has_cont else None
+        self.integrator = EulerMaruyama(noise=cfg.noise, sigma=cfg.sigma) if self.has_cont else None
         self.timegrid = TimeGrid(num_steps=cfg.num_steps)
 
         self.sampler = MixedPathSampler(

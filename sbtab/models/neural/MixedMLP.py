@@ -14,7 +14,9 @@ class MixedSbmMlp(nn.Module):
         hidden_dim: int,
         time_dim: int,
         n_layers: int,
-        dropout: float = 0.0
+        dropout: float = 0.0,
+        sin_emb_max_period: float = 10_000.0,
+        sin_emb_learnable_scale: bool = False
     ) -> None:
         """
         Init of the MLP backbone module which is used for the MSBM solver.
@@ -27,6 +29,8 @@ class MixedSbmMlp(nn.Module):
             time_dim (int): Dimension of the time embeddings.
             n_layers (int): Number of layers in the MLP.
             dropout (float): Dropout rate for the MLP. Defaults to 0.0.
+            sin_emb_max_period (float, optional): Maximum period of the Sinusoidal time embeddings. Defaults to 10_000.
+            sin_emb_learnable_scale (float, optional): Learning scale of the Sinusoidal time embeddings. Defaults to False.
 
         Raises:
             TypeError: If any element of cardinalities is not an integer.
@@ -44,7 +48,13 @@ class MixedSbmMlp(nn.Module):
         self.num_of_cat_features = len(self.cardinalities)
         self.S_max = max(self.cardinalities) if self.num_of_cat_features > 0 else 0
 
-        self.time_emb = SinusoidalTimeEmbedding(SinusoidalTimeEmbeddingConfig(dim=time_dim))
+        self.time_emb = SinusoidalTimeEmbedding(
+            SinusoidalTimeEmbeddingConfig(
+                dim=time_dim,
+                max_period=sin_emb_max_period,
+                learnable_scale=sin_emb_learnable_scale
+            )
+        )
         total_categories = sum(self.cardinalities)
         self.cat_emb = nn.Embedding(total_categories, cat_emb_dim)
 
