@@ -227,16 +227,14 @@ class CrossValidator:
         order_mask = torch.tensor([c in ordered_cols for c in all_cat_discrete], dtype=torch.bool)
 
         timegrid = TimeGrid(num_steps=bp["steps"])
-        max_card = max(cardinalities) if cardinalities else 0
-        padded_cardinalities = [max_card] * len(cardinalities)
 
-        fw_model = CSBMTableMLP(padded_cardinalities, bp["emb_dim"], bp["hidden_dim"], bp["time_dim"]).to(self.device)
-        bw_model = CSBMTableMLP(padded_cardinalities, bp["emb_dim"], bp["hidden_dim"], bp["time_dim"]).to(self.device)
+        fw_model = CSBMTableMLP(cardinalities, bp["emb_dim"], bp["hidden_dim"], bp["time_dim"]).to(self.device)
+        bw_model = CSBMTableMLP(cardinalities, bp["emb_dim"], bp["hidden_dim"], bp["time_dim"]).to(self.device)
 
         fw_opt = torch.optim.Adam(fw_model.parameters(), lr=bp["forward_lr"], weight_decay=bp["forward_weight_decay"])
         bw_opt = torch.optim.Adam(bw_model.parameters(), lr=bp["backward_lr"], weight_decay=bp["backward_weight_decay"])
 
-        process = CategoricalReference(padded_cardinalities, is_ordered=order_mask,
+        process = CategoricalReference(cardinalities, is_ordered=order_mask,
                                        total_number_of_q_powers=bp["steps"], alpha=bp["alpha"],
                                        device=torch.device(self.device))
         loss_fn = CSBMLoss(process, lmbda=bp["loss_lambda"])
@@ -248,7 +246,7 @@ class CrossValidator:
         g = torch.Generator(device="cpu").manual_seed(fold_seed)
         p1_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(train_tensor),
                                                 batch_size=bp["batch_size"], shuffle=True, generator=g)
-        x_noise = self.create_noise_dataset(len(train_tensor), padded_cardinalities, self.device)
+        x_noise = self.create_noise_dataset(len(train_tensor), cardinalities, self.device)
         p0_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_noise), batch_size=bp["batch_size"],
                                                 shuffle=True, generator=g)
 
@@ -256,7 +254,7 @@ class CrossValidator:
         solver.fit(p1_loader, p0_loader)
         elapsed = time.time() - start
 
-        z_noise = self.create_noise_dataset(num_samples, padded_cardinalities, self.device)
+        z_noise = self.create_noise_dataset(num_samples, cardinalities, self.device)
         synth_tensor, _ = sampler.simulate(x_init=z_noise, model=fw_model, direction="forward")
         synth_np = synth_tensor.cpu().numpy()
 
