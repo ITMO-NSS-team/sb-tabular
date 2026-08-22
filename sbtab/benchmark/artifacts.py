@@ -217,6 +217,39 @@ def _table_from_payload(payload: object) -> pd.DataFrame:
     return pd.DataFrame(decoded_rows, columns=cast(list[str], columns))
 
 
+def typed_table_sha256(frame: pd.DataFrame) -> str:
+    """Return the digest of the canonical tagged-JSON table representation."""
+
+    if not isinstance(frame, pd.DataFrame):
+        raise ContractViolation("frame must be a pandas DataFrame.")
+    return _sha256_bytes(_json_bytes(_table_payload(frame)))
+
+
+def write_typed_table(frame: pd.DataFrame, path: Path) -> str:
+    """Atomically write a portable tagged-JSON table and return its SHA-256."""
+
+    if not isinstance(frame, pd.DataFrame):
+        raise ContractViolation("frame must be a pandas DataFrame.")
+    if not isinstance(path, Path):
+        raise ContractViolation("path must be pathlib.Path.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = _json_bytes(_table_payload(frame))
+    _write_atomic(path, encoded)
+    return _sha256_bytes(encoded)
+
+
+def read_typed_table(path: Path, *, expected_sha256: str) -> pd.DataFrame:
+    """Read one tagged-JSON table after verifying its expected digest."""
+
+    if not isinstance(path, Path):
+        raise ContractViolation("path must be pathlib.Path.")
+    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+        raise ContractViolation("expected_sha256 must be a SHA-256 hex digest.")
+    if _sha256_file(path) != expected_sha256:
+        raise ContractViolation(f"Typed table checksum does not match: {path}.")
+    return _table_from_payload(_read_json(path, label="Typed table"))
+
+
 def _read_json(path: Path, *, label: str) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))

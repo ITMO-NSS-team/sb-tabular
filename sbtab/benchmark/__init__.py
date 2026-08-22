@@ -17,7 +17,10 @@ from sbtab.benchmark.artifacts import (
     GenerationArtifactStore,
     PersistedCrossValidation,
     cross_validation_result_fingerprint,
+    read_typed_table,
     run_cross_validation_resumable,
+    typed_table_sha256,
+    write_typed_table,
 )
 from sbtab.benchmark.codec import ModelCodec, compile_codec
 from sbtab.benchmark.contracts import (
@@ -118,13 +121,16 @@ __all__ = [
     "make_holdout",
     "make_splits",
     "prepare_cross_validation",
+    "read_typed_table",
     "run_cross_validation",
     "run_cross_validation_fold",
     "run_cross_validation_resumable",
     "run_holdout_trial",
+    "typed_table_sha256",
     "validate_adapter_definition",
     "validate_input_spec",
     "validate_prepared_table",
     "validate_sample_request",
     "validate_tabular_dataset",
+    "write_typed_table",
 ]

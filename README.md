@@ -253,7 +253,8 @@ pip install -r requirements.txt
 - **Feature-wise (structural) solvers**: `pgmpy`, `networkx` (DAG learning).
 - **Tuning scripts**: `optuna`.
 - **Baselines**: `sdv` (CTGAN), `tabpfgen` (TabPFGen); TabDDPM and STaSy are self-contained.
-- **Dataset download**: `ucimlrepo`.
+- **Dataset acquisition**: `ucimlrepo`, `kagglehub`; offline benchmark hosts
+  can load the checksum-verified bundle without either client.
 - **Optional** (commented out): `geotorch` — only for LightSB with a full covariance
   (`is_diagonal=False`); `matplotlib` — visualization notebooks.
 
@@ -268,7 +269,9 @@ boundary, fixed-configuration runners, and resumable fold artifacts. Evaluation 
 in `sbtab/evaluation/` and consume only decoded raw tables. See
 [`docs/benchmark-contract.md`](docs/benchmark-contract.md),
 [`docs/benchmark-metrics.md`](docs/benchmark-metrics.md), and
-[`docs/benchmark-artifacts.md`](docs/benchmark-artifacts.md).
+[`docs/benchmark-artifacts.md`](docs/benchmark-artifacts.md). The fourteen
+reviewed dataset declarations and portable offline format are documented in
+[`docs/benchmark-datasets.md`](docs/benchmark-datasets.md).
 
 Run its focused tests from the repository root:
 
