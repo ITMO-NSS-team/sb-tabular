@@ -1,4 +1,4 @@
-"""Tests for the explicit Online Shoppers pilot declaration."""
+"""Tests for the explicit UCI Online Shoppers dataset declaration."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from sbtab.benchmark.datasets import (
 
 
 def _online_shoppers_frame() -> pd.DataFrame:
-    """Return a tiny raw fixture with the real UCI column names and semantics."""
+    """Return source names with representative source-compatible values."""
 
     return pd.DataFrame(
         {
@@ -43,20 +43,23 @@ def _online_shoppers_frame() -> pd.DataFrame:
 
 
 class OnlineShoppersDeclarationTests(unittest.TestCase):
-    """Verify the approved pilot schema without downloading data."""
+    """Verify source identity and approved semantics without network access."""
 
-    def test_declaration_preserves_real_column_order_and_target(self) -> None:
+    def test_source_order_and_revenue_target_are_explicit(self) -> None:
         frame = _online_shoppers_frame()
 
         dataset = make_online_shoppers_dataset(frame)
 
         self.assertEqual(ONLINE_SHOPPERS_UCI_ID, 468)
+        self.assertEqual(ONLINE_SHOPPERS_TARGET, "Revenue")
+        self.assertIs(dataset.frame, frame)
         self.assertEqual(dataset.column_order, tuple(frame.columns))
         self.assertEqual(dataset.target, ONLINE_SHOPPERS_TARGET)
         self.assertEqual(dataset.task, TaskType.CLASSIFICATION)
+        self.assertIsNone(dataset.identifier)
         self.assertEqual(dataset.column("Revenue").kind, ColumnKind.CATEGORICAL)
 
-    def test_page_counts_are_discrete_and_nominal_columns_have_no_order(self) -> None:
+    def test_semantic_groups_follow_meaning_not_storage_dtype(self) -> None:
         dataset = make_online_shoppers_dataset(_online_shoppers_frame())
 
         self.assertEqual(
@@ -88,27 +91,37 @@ class OnlineShoppersDeclarationTests(unittest.TestCase):
                 "Revenue",
             ),
         )
-        self.assertIsNone(dataset.column("Month").ordered_values)
-        self.assertIsNone(dataset.column("Revenue").ordered_values)
+        self.assertTrue(
+            all(column.ordered_values is None for column in dataset.columns)
+        )
 
-    def test_static_specs_include_every_feature_and_target_once(self) -> None:
-        names = tuple(column.name for column in ONLINE_SHOPPERS_COLUMNS)
+    def test_canonical_order_does_not_depend_on_dataframe_column_order(self) -> None:
+        frame = _online_shoppers_frame()
+        reversed_frame = frame.loc[:, list(reversed(frame.columns))]
 
-        self.assertEqual(len(names), 18)
-        self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(names[-1], ONLINE_SHOPPERS_TARGET)
+        dataset = make_online_shoppers_dataset(reversed_frame)
 
-    def test_missing_source_column_is_rejected_with_name(self) -> None:
-        frame = _online_shoppers_frame().drop(columns=["Revenue"])
+        self.assertEqual(
+            dataset.column_order,
+            tuple(column.name for column in ONLINE_SHOPPERS_COLUMNS),
+        )
+        self.assertNotEqual(dataset.column_order, tuple(reversed_frame.columns))
 
-        with self.assertRaisesRegex(ContractViolation, "Revenue"):
-            make_online_shoppers_dataset(frame)
-
-    def test_unapproved_extra_column_is_not_silently_ignored(self) -> None:
-        frame = _online_shoppers_frame().assign(legacy_target=[1, 2])
-
-        with self.assertRaisesRegex(ContractViolation, "legacy_target"):
-            make_online_shoppers_dataset(frame)
+    def test_source_schema_drift_is_not_silently_accepted(self) -> None:
+        cases = (
+            (
+                _online_shoppers_frame().drop(columns=["Revenue"]),
+                "Revenue",
+            ),
+            (
+                _online_shoppers_frame().assign(legacy_target=[1, 2]),
+                "legacy_target",
+            ),
+        )
+        for frame, expected_column in cases:
+            with self.subTest(expected_column=expected_column):
+                with self.assertRaisesRegex(ContractViolation, expected_column):
+                    make_online_shoppers_dataset(frame)
 
 
 if __name__ == "__main__":

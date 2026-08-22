@@ -1,13 +1,14 @@
-"""Canonical declaration of the approved MSBM pilot dataset.
+"""Canonical semantic declaration for UCI Online Shoppers dataset 468.
 
-The module contains no download logic and does not infer semantics from pandas
-dtypes. A caller supplies the raw UCI Online Shoppers frame, including the
-``Revenue`` target, and receives a validated :class:`TabularDataset`.
+This module contains no acquisition or preprocessing logic. A caller supplies
+the raw 17-feature table with its ``Revenue`` target attached, and the factory
+returns a validated :class:`~sbtab.benchmark.contracts.TabularDataset`.
 
-MSBM treats the three page-count columns as ordered numeric discrete states.
-The remaining finite-state columns are nominal. In particular, ``Month`` is
-cyclic while MSBM's ordered reference is linear, so declaring it ordered would
-encode the wrong neighbourhood.
+The three page-visit counts are numeric discrete values. Durations, rates,
+page value, and special-day proximity are continuous. The remaining source
+fields are nominal categories even when UCI stores them as integer codes or
+booleans. ``Month`` is cyclic rather than ordinal, so it has no linear
+``ordered_values`` declaration.
 """
 
 from __future__ import annotations
@@ -20,12 +21,15 @@ from sbtab.benchmark.contracts import (
     TabularDataset,
     TaskType,
 )
-from sbtab.benchmark.validation import ContractViolation, validate_tabular_dataset
+from sbtab.benchmark.validation import validate_tabular_dataset
 
 
 ONLINE_SHOPPERS_UCI_ID = 468
 ONLINE_SHOPPERS_TARGET = "Revenue"
 
+# UCI feature order followed by the separate source target. This tuple is the
+# canonical generated-table order; callers are not required to rely on the
+# physical order of columns in their input DataFrame.
 ONLINE_SHOPPERS_COLUMNS: tuple[ColumnSpec, ...] = (
     ColumnSpec("Administrative", ColumnKind.DISCRETE),
     ColumnSpec("Administrative_Duration", ColumnKind.CONTINUOUS),
@@ -48,77 +52,34 @@ ONLINE_SHOPPERS_COLUMNS: tuple[ColumnSpec, ...] = (
 )
 
 
-def fetch_online_shoppers_frame() -> pd.DataFrame:
-    """Download and assemble the canonical raw UCI 468 frame.
-
-    ``ucimlrepo`` remains an optional acquisition dependency. Importing this
-    dataset module performs no network work; the package is loaded only when
-    this function is called.
-    """
-
-    try:
-        from ucimlrepo import fetch_ucirepo
-    except ImportError as error:
-        raise RuntimeError(
-            "Fetching UCI 468 requires the optional ucimlrepo package. "
-            "Install it or supply a CSV to the calling pilot."
-        ) from error
-
-    repository = fetch_ucirepo(id=ONLINE_SHOPPERS_UCI_ID)
-    features = repository.data.features.copy().reset_index(drop=True)
-    targets = repository.data.targets
-    if targets is None:
-        raise ContractViolation(
-            f"UCI {ONLINE_SHOPPERS_UCI_ID} returned no target table."
-        )
-    if isinstance(targets, pd.Series):
-        target_frame = targets.to_frame()
-    elif isinstance(targets, pd.DataFrame):
-        target_frame = targets.copy()
-    else:
-        target_frame = pd.DataFrame(targets)
-    target_frame = target_frame.reset_index(drop=True)
-    if ONLINE_SHOPPERS_TARGET not in target_frame.columns:
-        raise ContractViolation(
-            f"UCI {ONLINE_SHOPPERS_UCI_ID} target table lacks "
-            f"{ONLINE_SHOPPERS_TARGET!r}."
-        )
-    if ONLINE_SHOPPERS_TARGET in features.columns:
-        raise ContractViolation(
-            "UCI features unexpectedly contain target "
-            f"{ONLINE_SHOPPERS_TARGET!r}."
-        )
-    return pd.concat(
-        (features, target_frame[[ONLINE_SHOPPERS_TARGET]]),
-        axis=1,
-    )
-
-
 def make_online_shoppers_dataset(
     frame: pd.DataFrame,
     *,
     name: str = "online_shoppers_uci_468",
 ) -> TabularDataset:
-    """Build and validate the approved Online Shoppers dataset declaration.
+    """Attach the approved Online Shoppers semantics to one raw table.
 
     Parameters
     ----------
     frame:
-        Raw UCI 468 table with all 17 features and the ``Revenue`` target. The
-        function does not download, filter, reorder, or copy rows.
+        Raw UCI 468 data with all 17 features and the ``Revenue`` target. The
+        function retains this object and does not download, filter, reorder,
+        or copy its rows.
     name:
-        Artifact label only. Benchmark behavior must not dispatch on it.
+        Stable artifact label only. Benchmark behavior must not dispatch on
+        this value.
 
     Returns
     -------
     TabularDataset
-        Validated dataset with target retained in canonical modeled order.
+        Validated declaration with ``Revenue`` retained as the final modeled
+        column and classification target.
 
     Raises
     ------
     ContractViolation
-        If required columns are absent, duplicated, or accompanied by
-        undeclared raw columns.
+        If the supplied frame contradicts the declared names or value
+        semantics, including missing, duplicate, or undeclared columns.
     """
 
     dataset = TabularDataset(
