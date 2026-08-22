@@ -163,6 +163,28 @@ class FoldResult:
 
 
 @dataclass(frozen=True)
+class CrossValidationPlan:
+    """Post-policy dataset and immutable fold membership for one final run.
+
+    Preparing the plan performs every deterministic operation that must match
+    across a resumed run. It does not construct an adapter or fit a model.
+    """
+
+    config: BenchmarkConfig
+    dataset: TabularDataset
+    missing_report: MissingReport
+    splits: tuple[FoldSplit, ...]
+
+
+@dataclass(frozen=True)
+class FoldExecution:
+    """One independently executable fold paired with its adapter identity."""
+
+    adapter_name: str
+    fold: FoldResult
+
+
+@dataclass(frozen=True)
 class CrossValidationResult:
     """Complete pre-evaluation output for one adapter and common fold set.
 
@@ -277,6 +299,110 @@ def _fit_sample_decode(
     return train_raw, synthetic_raw, fit_seconds, sample_seconds
 
 
+def prepare_cross_validation(
+    dataset: TabularDataset,
+    config: BenchmarkConfig,
+) -> CrossValidationPlan:
+    """Apply the global row policy and materialize deterministic fold splits."""
+
+    if not isinstance(config, BenchmarkConfig):
+        raise ContractViolation("config must be BenchmarkConfig.")
+    missing_result = apply_missing_policy(dataset, config.missing_policy)
+    return CrossValidationPlan(
+        config=config,
+        dataset=missing_result.dataset,
+        missing_report=missing_result.report,
+        splits=make_splits(missing_result.dataset, config.split),
+    )
+
+
+def run_cross_validation_fold(
+    plan: CrossValidationPlan,
+    split: FoldSplit,
+    adapter: ModelAdapter,
+) -> FoldExecution:
+    """Fit, sample, and decode one declared fold from a prepared plan."""
+
+    if not isinstance(plan, CrossValidationPlan):
+        raise ContractViolation("plan must be CrossValidationPlan.")
+    if split not in plan.splits:
+        raise ContractViolation("split does not belong to this cross-validation plan.")
+    validate_adapter_definition(adapter)
+
+    _, test_raw = _modeled_partition(plan.dataset, split.test_positions)
+    context = RunContext(
+        run_id=plan.config.run_id,
+        fold_id=split.fold_id,
+        seed=plan.config.training_seed + split.fold_id,
+        device=plan.config.device,
+        artifact_dir=plan.config.artifact_dir / f"fold-{split.fold_id}",
+    )
+    train_raw, synthetic_raw, fit_seconds, sample_seconds = _fit_sample_decode(
+        dataset=plan.dataset,
+        adapter=adapter,
+        train_positions=split.train_positions,
+        context=context,
+        n_samples=len(split.train_positions),
+        sample_seed=plan.config.sample_seed + split.fold_id,
+    )
+    return FoldExecution(
+        adapter_name=adapter.name,
+        fold=FoldResult(
+            split=split,
+            train_raw=train_raw,
+            test_raw=test_raw,
+            synthetic_raw=synthetic_raw,
+            fit_seconds=fit_seconds,
+            sample_seconds=sample_seconds,
+        ),
+    )
+
+
+def assemble_cross_validation(
+    plan: CrossValidationPlan,
+    executions: tuple[FoldExecution, ...],
+) -> CrossValidationResult:
+    """Validate and assemble exactly one execution for every planned fold."""
+
+    if not isinstance(plan, CrossValidationPlan):
+        raise ContractViolation("plan must be CrossValidationPlan.")
+    by_fold: dict[int, FoldExecution] = {}
+    for execution in executions:
+        if not isinstance(execution, FoldExecution):
+            raise ContractViolation("executions must contain FoldExecution values.")
+        fold_id = execution.fold.split.fold_id
+        if fold_id in by_fold:
+            raise ContractViolation(f"Duplicate fold execution for fold {fold_id}.")
+        by_fold[fold_id] = execution
+
+    planned_ids = tuple(split.fold_id for split in plan.splits)
+    actual_ids = tuple(sorted(by_fold))
+    if actual_ids != planned_ids:
+        raise ContractViolation(
+            "Fold executions must cover the complete plan; "
+            f"actual={actual_ids!r}, expected={planned_ids!r}."
+        )
+
+    ordered = tuple(by_fold[fold_id] for fold_id in planned_ids)
+    for split, execution in zip(plan.splits, ordered):
+        if execution.fold.split != split:
+            raise ContractViolation(
+                f"Fold {split.fold_id} membership differs from the plan."
+            )
+    adapter_name = ordered[0].adapter_name
+    if any(execution.adapter_name != adapter_name for execution in ordered[1:]):
+        raise ContractViolation(
+            "Fold executions contain inconsistent adapter names."
+        )
+    return CrossValidationResult(
+        adapter_name=adapter_name,
+        config=plan.config,
+        dataset=plan.dataset,
+        missing_report=plan.missing_report,
+        folds=tuple(execution.fold for execution in ordered),
+    )
+
+
 def run_cross_validation(
     dataset: TabularDataset,
     adapter_factory: Callable[[], ModelAdapter],
@@ -295,14 +421,10 @@ def run_cross_validation(
     if not isinstance(config, BenchmarkConfig):
         raise ContractViolation("config must be BenchmarkConfig.")
 
-    missing_result = apply_missing_policy(dataset, config.missing_policy)
-    run_dataset = missing_result.dataset
-    splits = make_splits(run_dataset, config.split)
-
-    fold_results: list[FoldResult] = []
+    plan = prepare_cross_validation(dataset, config)
+    executions: list[FoldExecution] = []
     adapters: list[ModelAdapter] = []
-    adapter_name: str | None = None
-    for split in splits:
+    for split in plan.splits:
         adapter = adapter_factory()
         validate_adapter_definition(adapter)
         if any(adapter is previous for previous in adapters):
@@ -310,56 +432,10 @@ def run_cross_validation(
                 "adapter_factory must return a fresh adapter instance per fold."
             )
         adapters.append(adapter)
-        if adapter_name is None:
-            adapter_name = adapter.name
-        elif adapter.name != adapter_name:
-            raise ContractViolation(
-                "adapter_factory returned inconsistent model names: "
-                f"{adapter_name!r} and {adapter.name!r}."
-            )
-
-        _, test_raw = _modeled_partition(
-            run_dataset,
-            split.test_positions,
+        executions.append(
+            run_cross_validation_fold(plan, split, adapter)
         )
-        context = RunContext(
-            run_id=config.run_id,
-            fold_id=split.fold_id,
-            seed=config.training_seed + split.fold_id,
-            device=config.device,
-            artifact_dir=config.artifact_dir / f"fold-{split.fold_id}",
-        )
-        train_raw, synthetic_raw, fit_seconds, sample_seconds = (
-            _fit_sample_decode(
-                dataset=run_dataset,
-                adapter=adapter,
-                train_positions=split.train_positions,
-                context=context,
-                n_samples=len(split.train_positions),
-                sample_seed=config.sample_seed + split.fold_id,
-            )
-        )
-
-        fold_results.append(
-            FoldResult(
-                split=split,
-                train_raw=train_raw,
-                test_raw=test_raw,
-                synthetic_raw=synthetic_raw,
-                fit_seconds=fit_seconds,
-                sample_seconds=sample_seconds,
-            )
-        )
-
-    if adapter_name is None:
-        raise ContractViolation("Cross-validation produced no folds.")
-    return CrossValidationResult(
-        adapter_name=adapter_name,
-        config=config,
-        dataset=run_dataset,
-        missing_report=missing_result.report,
-        folds=tuple(fold_results),
-    )
+    return assemble_cross_validation(plan, tuple(executions))
 
 
 def run_holdout_trial(

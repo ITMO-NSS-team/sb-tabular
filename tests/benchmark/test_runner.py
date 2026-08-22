@@ -26,7 +26,10 @@ from sbtab.benchmark import (
     StratifiedKFoldConfig,
     TabularDataset,
     TaskType,
+    assemble_cross_validation,
+    prepare_cross_validation,
     run_cross_validation,
+    run_cross_validation_fold,
     run_holdout_trial,
 )
 
@@ -186,6 +189,38 @@ class CrossValidationRunnerTests(unittest.TestCase):
 
         self.assertEqual(sorted(all_test_positions), list(range(17)))
         self.assertFalse(config.artifact_dir.exists())
+
+    def test_plan_allows_independent_fold_execution_and_strict_assembly(
+        self,
+    ) -> None:
+        config = BenchmarkConfig(
+            split=KFoldConfig(n_splits=2, seed=42),
+            missing_policy=MissingPolicy.COMPLETE_CASE,
+        )
+        plan = prepare_cross_validation(_dataset(with_missing=True), config)
+
+        self.assertEqual(plan.missing_report.rows_after, 17)
+        self.assertEqual(tuple(split.fold_id for split in plan.splits), (0, 1))
+        first = run_cross_validation_fold(
+            plan,
+            plan.splits[0],
+            _EchoAdapter(),
+        )
+        with self.assertRaisesRegex(ContractViolation, "complete plan"):
+            assemble_cross_validation(plan, (first,))
+
+        second = run_cross_validation_fold(
+            plan,
+            plan.splits[1],
+            _EchoAdapter(),
+        )
+        result = assemble_cross_validation(plan, (second, first))
+
+        self.assertEqual(result.adapter_name, "echo")
+        self.assertEqual(
+            tuple(fold.split.fold_id for fold in result.folds),
+            (0, 1),
+        )
 
     def test_default_missing_policy_stops_before_adapter_construction(self) -> None:
         factory_calls = 0
