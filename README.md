@@ -260,25 +260,26 @@ pip install -r requirements.txt
 Python ≥ 3.10 is assumed. There is no `pyproject.toml` yet, so run scripts from the repository
 root (or add it to `PYTHONPATH`) so that `import sbtab` resolves.
 
-## Unified benchmark contract
+## Unified benchmark pipeline
 
-The initial model-independent data boundary lives in `sbtab/benchmark/`. It defines explicit
-raw column semantics and the canonical table exchanged with future model adapters. See
-[`docs/benchmark-contract.md`](docs/benchmark-contract.md) for its scope and invariants.
+The model-independent benchmark foundation lives in `sbtab/benchmark/`. It defines explicit
+raw column semantics, missing and split policies, fold-local preprocessing, the thin adapter
+boundary, fixed-configuration runners, and resumable fold artifacts. Evaluation formulas live
+in `sbtab/evaluation/` and consume only decoded raw tables. See
+[`docs/benchmark-contract.md`](docs/benchmark-contract.md),
+[`docs/benchmark-metrics.md`](docs/benchmark-metrics.md), and
+[`docs/benchmark-artifacts.md`](docs/benchmark-artifacts.md).
 
 Run its focused tests from the repository root:
 
 ```bash
-python -m unittest \
-  tests.benchmark.test_contracts \
-  tests.benchmark.test_import_boundaries \
-  tests.benchmark.test_missing
+python -m unittest discover -s tests/benchmark
 ```
 
 ## Status and known gaps
 
-- The evaluation utilities are being consolidated into `sbtab/evaluation/`; the metric
-  implementations currently live inside the `sbtab/experiments/*_metrics.py` scripts.
+- Model adapters and model-owned tuning entrypoints are being migrated incrementally; legacy
+  experiment scripts remain behavioral evidence rather than the new orchestration boundary.
 - CSBM (categorical) and MixedSBM (mixed) are the newest solvers and do not yet have example
   scripts or committed benchmark results.
 - There is no `pyproject.toml` or repository-wide test suite yet. The unified benchmark

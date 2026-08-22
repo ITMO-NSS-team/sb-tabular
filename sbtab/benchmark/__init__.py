@@ -12,6 +12,13 @@ from sbtab.benchmark.adapter import (
     validate_adapter_definition,
     validate_sample_request,
 )
+from sbtab.benchmark.artifacts import (
+    GENERATION_ARTIFACT_VERSION,
+    GenerationArtifactStore,
+    PersistedCrossValidation,
+    cross_validation_result_fingerprint,
+    run_cross_validation_resumable,
+)
 from sbtab.benchmark.codec import ModelCodec, compile_codec
 from sbtab.benchmark.contracts import (
     CategoricalView,
@@ -80,6 +87,8 @@ __all__ = [
     "FoldExecution",
     "FoldSplit",
     "FoldResult",
+    "GENERATION_ARTIFACT_VERSION",
+    "GenerationArtifactStore",
     "HoldoutConfig",
     "HoldoutResult",
     "HoldoutRunConfig",
@@ -94,6 +103,7 @@ __all__ = [
     "ModelCodec",
     "PreparedSchema",
     "PreparedTable",
+    "PersistedCrossValidation",
     "RunContext",
     "SplitConfig",
     "StateColumn",
@@ -104,11 +114,13 @@ __all__ = [
     "apply_missing_policy",
     "assemble_cross_validation",
     "compile_codec",
+    "cross_validation_result_fingerprint",
     "make_holdout",
     "make_splits",
     "prepare_cross_validation",
     "run_cross_validation",
     "run_cross_validation_fold",
+    "run_cross_validation_resumable",
     "run_holdout_trial",
     "validate_adapter_definition",
     "validate_input_spec",
