@@ -2,8 +2,8 @@
 
 Status: reviewable benchmark foundation. This document covers the public data
 boundary, validation, common missing-value and split policies, the fold-local
-codec, and the thin model-adapter boundary. Runners and evaluation are
-introduced in separate changes.
+codec, the thin model-adapter boundary, and fixed-configuration orchestration.
+Hyperparameter search and evaluation are introduced in separate changes.
 
 ## Purpose
 
@@ -258,6 +258,36 @@ extraction, and model hyperparameters remain adapter-owned details. An adapter
 does not split data, fit generic preprocessing, decode values, or calculate
 metrics.
 
+## Fixed-configuration orchestration
+
+`run_holdout_trial` and `run_cross_validation` compose the shared components in
+one enforced order:
+
+1. apply one explicit missing policy to the complete raw dataset;
+2. create a benchmark-owned raw holdout or K-fold partition;
+3. construct a fresh codec and adapter for that partition;
+4. fit the codec on raw training rows and pass the prepared table to the
+   adapter;
+5. ask the adapter for a fixed number of prepared samples;
+6. validate and decode those samples back to raw semantic values.
+
+Held-out rows bypass both codec and adapter. They are copied into the result
+only so a later model-independent evaluator can compare them with synthetic
+data. A holdout trial samples the validation-row count; final cross-validation
+samples the training-row count so downstream TSTR can train on a synthetic
+table of the same size as the real training fold.
+
+`HoldoutRunConfig` and `BenchmarkConfig` contain only shared split, missing,
+seed, device, run-label, and artifact-path controls. The runner has no Optuna
+dependency and receives no model hyperparameters. A model-owned tuner closes
+over one fixed typed model configuration in its adapter factory, executes the
+holdout runner, and calculates an objective from returned raw tables.
+
+Fit and sample timings cover only completed adapter calls. They exclude
+missing-value handling, splitting, codec fitting, inverse decoding, artifact
+serialization, and evaluation. Backend adapters are responsible for returning
+only after asynchronous native work relevant to the call has completed.
+
 ## Dependency boundary
 
 The new `sbtab.benchmark` package must not import the legacy orchestration APIs
@@ -285,7 +315,8 @@ python -m unittest \
   tests.benchmark.test_missing \
   tests.benchmark.test_splitting \
   tests.benchmark.test_adapter \
-  tests.benchmark.test_codec
+  tests.benchmark.test_codec \
+  tests.benchmark.test_runner
 ```
 
 The tests cover malformed declarations, target/task and identifier rules,
@@ -295,3 +326,5 @@ handling, deterministic row partitions, and target stratification constraints.
 Codec tests additionally cover train-only state, reversible semantic views,
 schema identity, unsupported groups, identifiers, and invalid generated
 states. Adapter tests cover structural metadata and explicit runtime controls.
+Runner tests cover orchestration order, fresh per-fold state, held-out
+isolation, output cardinality, decoding failures, seeds, and timing boundaries.

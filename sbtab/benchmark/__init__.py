@@ -34,6 +34,15 @@ from sbtab.benchmark.missing import (
     MissingValuesError,
     apply_missing_policy,
 )
+from sbtab.benchmark.runner import (
+    BenchmarkConfig,
+    CrossValidationResult,
+    FoldResult,
+    HoldoutResult,
+    HoldoutRunConfig,
+    run_cross_validation,
+    run_holdout_trial,
+)
 from sbtab.benchmark.splitting import (
     FoldSplit,
     HoldoutConfig,
@@ -53,15 +62,20 @@ from sbtab.benchmark.validation import (
 )
 
 __all__ = [
+    "BenchmarkConfig",
     "CategoricalView",
     "ClassCount",
     "ColumnKind",
     "ColumnSpec",
     "ContinuousView",
     "ContractViolation",
+    "CrossValidationResult",
     "DiscreteView",
     "FoldSplit",
+    "FoldResult",
     "HoldoutConfig",
+    "HoldoutResult",
+    "HoldoutRunConfig",
     "HoldoutSplit",
     "InputSpec",
     "KFoldConfig",
@@ -84,6 +98,8 @@ __all__ = [
     "compile_codec",
     "make_holdout",
     "make_splits",
+    "run_cross_validation",
+    "run_holdout_trial",
     "validate_adapter_definition",
     "validate_input_spec",
     "validate_prepared_table",
