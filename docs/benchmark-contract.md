@@ -1,9 +1,9 @@
 # Unified benchmark data contract
 
-Status: initial reviewable foundation. This document covers only the public
-data boundary implemented in `sbtab/benchmark/contracts.py` and its validation.
-Splitting, preprocessing, model adapters, runners, and evaluation are separate
-changes and are intentionally not implemented by this contract PR.
+Status: reviewable benchmark foundation. This document covers the public data
+boundary, validation, the common missing-value policy, and benchmark-owned
+split strategies. Preprocessing, model adapters, runners, and evaluation are
+introduced in separate changes.
 
 ## Purpose
 
@@ -174,8 +174,39 @@ configuration is introduced. This module itself has no implicit default:
 callers must pass the policy. Imputation and model-native missing handling are
 not v1 enum values and require a separate contract decision.
 
-This policy layer does not create holdout or KFold splits. Splitting remains a
-separate benchmark-owned component that consumes only the post-policy dataset.
+The policy layer itself does not choose train and held-out rows. The splitting
+component below consumes its post-policy dataset, so every model sees identical
+source rows before any fold-local preprocessing is fitted.
+
+## Benchmark-owned splitting
+
+`sbtab.benchmark.splitting` produces immutable positional row partitions. It
+does not fit preprocessing, inspect model requirements, or expose held-out raw
+rows to a generator. Positions refer to the post-policy frame rather than its
+pandas index labels, so custom or duplicated index labels cannot change split
+membership.
+
+Two split families have different purposes:
+
+- `HoldoutConfig` and `StratifiedHoldoutConfig` create the train/validation
+  partition used to select model hyperparameters. Their reference defaults are
+  an 80/20 split with seed `5`.
+- `KFoldConfig` and `StratifiedKFoldConfig` create the common final comparison
+  folds. Their reference defaults are five shuffled folds with seed `42`.
+
+Stratified variants are valid only for classification with a declared
+discrete or categorical target. They read raw target values solely to assign
+rows while preserving class representation. The target remains an ordinary
+modeled column in each training partition; it is not passed separately through
+the shared contract. Each observed class must have enough rows to appear in
+every requested K-fold partition, and a stratified holdout must leave room for
+each class in both partitions.
+
+Splitters reject modeled missing values. Callers must first apply the single
+experiment-wide `MissingPolicy`; a model or adapter cannot substitute its own
+row filtering. Splitting also precedes every learned transform. Consequently,
+future codecs must fit only on the returned training positions, and held-out
+categories or numeric distributions cannot influence their fitted state.
 
 ## Dependency boundary
 
@@ -201,10 +232,11 @@ From the repository root, run the tests owned by this contract:
 python -m unittest \
   tests.benchmark.test_contracts \
   tests.benchmark.test_import_boundaries \
-  tests.benchmark.test_missing
+  tests.benchmark.test_missing \
+  tests.benchmark.test_splitting
 ```
 
 The tests cover malformed declarations, target/task and identifier rules,
 semantic partitions, finite-state ranges, timestamp category identity,
-canonical order, both dependency directions, and uniform pre-split missing
-handling.
+canonical order, both dependency directions, uniform pre-split missing
+handling, deterministic row partitions, and target stratification constraints.
