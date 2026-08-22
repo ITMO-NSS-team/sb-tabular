@@ -1,8 +1,8 @@
 # Unified benchmark data contract
 
 Status: reviewable benchmark foundation. This document covers the public data
-boundary, validation, the common missing-value policy, and benchmark-owned
-split strategies. Preprocessing, model adapters, runners, and evaluation are
+boundary, validation, common missing-value and split policies, the fold-local
+codec, and the thin model-adapter boundary. Runners and evaluation are
 introduced in separate changes.
 
 ## Purpose
@@ -205,8 +205,58 @@ each class in both partitions.
 Splitters reject modeled missing values. Callers must first apply the single
 experiment-wide `MissingPolicy`; a model or adapter cannot substitute its own
 row filtering. Splitting also precedes every learned transform. Consequently,
-future codecs must fit only on the returned training positions, and held-out
-categories or numeric distributions cannot influence their fitted state.
+the codec below fits only on the returned training positions, and held-out
+categories or numeric distributions cannot influence its fitted state.
+
+## Fold-local model codec
+
+`compile_codec(dataset, input_spec)` validates dataset semantics and creates an
+unfitted, single-use `ModelCodec`. Its `fit_transform(train_raw)` method learns
+generic preprocessing from one raw training partition and returns the
+canonical `PreparedTable` accepted by an adapter. The codec does not retain the
+complete dataset frame and deliberately exposes no method for transforming
+held-out rows.
+
+The codec owns all model-independent learned transforms requested by
+`InputSpec`:
+
+- `STANDARD` uses the training-partition population mean and standard
+  deviation for each continuous column; constant columns use scale `1`;
+- `FINITE_STATE_CODES` builds a separate train-observed codebook for each
+  discrete or categorical column;
+- raw finite-state views preserve values but still record their training
+  support so unseen generated values fail during decoding.
+
+Discrete codebooks follow ascending numeric order. Ordered categorical
+codebooks follow the declared order restricted to values observed in the
+training partition. Nominal categorical codebooks follow first-observed train
+order. Cardinality and ordering metadata are keyed by column name in the
+prepared schema.
+
+`inverse_transform(sample)` accepts a validated model sample carrying the
+exact schema object produced by that codec. It reverses learned transforms to
+raw semantic values and rejects invalid state codes or raw finite values absent
+from train support. It does not clip, round, impute, or coerce generated values
+to mimic the original pandas storage dtype. Identifier columns remain outside
+both prepared and decoded modeled tables.
+
+## Thin model-adapter boundary
+
+Every model integration implements the runtime-checkable `ModelAdapter`
+protocol:
+
+- `name` is a stable artifact label;
+- `input_spec` declares only the three semantic views;
+- `fit(train, context)` consumes one complete prepared training table;
+- `sample(n, seed)` returns all modeled columns in a `PreparedTable` carrying
+  the same fold schema.
+
+`RunContext` contains only model-independent runtime controls: run and fold
+identifiers, training seed, device string, and a fold-specific artifact path.
+Native arrays or tensors, dtypes, layouts, loaders, temporary target
+extraction, and model hyperparameters remain adapter-owned details. An adapter
+does not split data, fit generic preprocessing, decode values, or calculate
+metrics.
 
 ## Dependency boundary
 
@@ -233,10 +283,15 @@ python -m unittest \
   tests.benchmark.test_contracts \
   tests.benchmark.test_import_boundaries \
   tests.benchmark.test_missing \
-  tests.benchmark.test_splitting
+  tests.benchmark.test_splitting \
+  tests.benchmark.test_adapter \
+  tests.benchmark.test_codec
 ```
 
 The tests cover malformed declarations, target/task and identifier rules,
 semantic partitions, finite-state ranges, timestamp category identity,
 canonical order, both dependency directions, uniform pre-split missing
 handling, deterministic row partitions, and target stratification constraints.
+Codec tests additionally cover train-only state, reversible semantic views,
+schema identity, unsupported groups, identifiers, and invalid generated
+states. Adapter tests cover structural metadata and explicit runtime controls.
