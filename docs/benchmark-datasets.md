@@ -80,7 +80,7 @@ does not download data or require acquisition-only dependencies.
 UCI loading requires `ucimlrepo`; Kaggle loading requires `kagglehub` and may
 require Kaggle authentication or source-license consent. Kaggle's official
 client accepts a versioned handle such as `owner/dataset/versions/1`, but the
-six inherited collection handles currently select latest; the bundle digest
+eight inherited collection handles currently select latest; the bundle digest
 therefore remains mandatory:
 
 ```bash
