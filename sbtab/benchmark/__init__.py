@@ -1,0 +1,130 @@
+"""Unified, model-independent benchmark data boundary.
+
+The package is intentionally independent of the legacy ``sbtab.data``,
+``sbtab.transforms``, and ``sbtab.experiments`` orchestration paths.
+"""
+
+from __future__ import annotations
+
+from sbtab.benchmark.adapter import (
+    ModelAdapter,
+    RunContext,
+    validate_adapter_definition,
+    validate_sample_request,
+)
+from sbtab.benchmark.artifacts import (
+    GENERATION_ARTIFACT_VERSION,
+    GenerationArtifactStore,
+    PersistedCrossValidation,
+    cross_validation_result_fingerprint,
+    run_cross_validation_resumable,
+)
+from sbtab.benchmark.codec import ModelCodec, compile_codec
+from sbtab.benchmark.contracts import (
+    CategoricalView,
+    ColumnKind,
+    ColumnSpec,
+    ContinuousView,
+    DiscreteView,
+    InputSpec,
+    PreparedSchema,
+    PreparedTable,
+    StateColumn,
+    TabularDataset,
+    TaskType,
+)
+from sbtab.benchmark.missing import (
+    ClassCount,
+    MissingPolicy,
+    MissingPolicyResult,
+    MissingReport,
+    MissingValuesError,
+    apply_missing_policy,
+)
+from sbtab.benchmark.runner import (
+    BenchmarkConfig,
+    CrossValidationPlan,
+    CrossValidationResult,
+    FoldExecution,
+    FoldResult,
+    HoldoutResult,
+    HoldoutRunConfig,
+    assemble_cross_validation,
+    prepare_cross_validation,
+    run_cross_validation,
+    run_cross_validation_fold,
+    run_holdout_trial,
+)
+from sbtab.benchmark.splitting import (
+    FoldSplit,
+    HoldoutConfig,
+    HoldoutSplit,
+    KFoldConfig,
+    SplitConfig,
+    StratifiedHoldoutConfig,
+    StratifiedKFoldConfig,
+    make_holdout,
+    make_splits,
+)
+from sbtab.benchmark.validation import (
+    ContractViolation,
+    validate_input_spec,
+    validate_prepared_table,
+    validate_tabular_dataset,
+)
+
+__all__ = [
+    "BenchmarkConfig",
+    "CategoricalView",
+    "ClassCount",
+    "ColumnKind",
+    "ColumnSpec",
+    "ContinuousView",
+    "ContractViolation",
+    "CrossValidationPlan",
+    "CrossValidationResult",
+    "DiscreteView",
+    "FoldExecution",
+    "FoldSplit",
+    "FoldResult",
+    "GENERATION_ARTIFACT_VERSION",
+    "GenerationArtifactStore",
+    "HoldoutConfig",
+    "HoldoutResult",
+    "HoldoutRunConfig",
+    "HoldoutSplit",
+    "InputSpec",
+    "KFoldConfig",
+    "MissingPolicy",
+    "MissingPolicyResult",
+    "MissingReport",
+    "MissingValuesError",
+    "ModelAdapter",
+    "ModelCodec",
+    "PreparedSchema",
+    "PreparedTable",
+    "PersistedCrossValidation",
+    "RunContext",
+    "SplitConfig",
+    "StateColumn",
+    "StratifiedHoldoutConfig",
+    "StratifiedKFoldConfig",
+    "TabularDataset",
+    "TaskType",
+    "apply_missing_policy",
+    "assemble_cross_validation",
+    "compile_codec",
+    "cross_validation_result_fingerprint",
+    "make_holdout",
+    "make_splits",
+    "prepare_cross_validation",
+    "run_cross_validation",
+    "run_cross_validation_fold",
+    "run_cross_validation_resumable",
+    "run_holdout_trial",
+    "validate_adapter_definition",
+    "validate_input_spec",
+    "validate_prepared_table",
+    "validate_sample_request",
+    "validate_tabular_dataset",
+]
