@@ -253,18 +253,37 @@ pip install -r requirements.txt
 - **Feature-wise (structural) solvers**: `pgmpy`, `networkx` (DAG learning).
 - **Tuning scripts**: `optuna`.
 - **Baselines**: `sdv` (CTGAN), `tabpfgen` (TabPFGen); TabDDPM and STaSy are self-contained.
-- **Dataset download**: `ucimlrepo`.
+- **Dataset acquisition**: `ucimlrepo`, `kagglehub`; offline benchmark hosts
+  can load the checksum-verified bundle without either client.
 - **Optional** (commented out): `geotorch` — only for LightSB with a full covariance
   (`is_diagonal=False`); `matplotlib` — visualization notebooks.
 
 Python ≥ 3.10 is assumed. There is no `pyproject.toml` yet, so run scripts from the repository
 root (or add it to `PYTHONPATH`) so that `import sbtab` resolves.
 
+## Unified benchmark pipeline
+
+The model-independent benchmark foundation lives in `sbtab/benchmark/`. It defines explicit
+raw column semantics, missing and split policies, fold-local preprocessing, the thin adapter
+boundary, fixed-configuration runners, and resumable fold artifacts. Evaluation formulas live
+in `sbtab/evaluation/` and consume only decoded raw tables. See
+[`docs/benchmark-contract.md`](docs/benchmark-contract.md),
+[`docs/benchmark-metrics.md`](docs/benchmark-metrics.md), and
+[`docs/benchmark-artifacts.md`](docs/benchmark-artifacts.md). The fourteen
+reviewed dataset declarations and portable offline format are documented in
+[`docs/benchmark-datasets.md`](docs/benchmark-datasets.md).
+
+Run its focused tests from the repository root:
+
+```bash
+python -m unittest discover -s tests/benchmark
+```
+
 ## Status and known gaps
 
-- The evaluation utilities are being consolidated into `sbtab/evaluation/`; the metric
-  implementations currently live inside the `sbtab/experiments/*_metrics.py` scripts.
+- Model adapters and model-owned tuning entrypoints are being migrated incrementally; legacy
+  experiment scripts remain behavioral evidence rather than the new orchestration boundary.
 - CSBM (categorical) and MixedSBM (mixed) are the newest solvers and do not yet have example
   scripts or committed benchmark results.
-- No `pyproject.toml` packaging, tests, or CI yet (dependencies are tracked in
-  `requirements.txt`).
+- There is no `pyproject.toml` or repository-wide test suite yet. The unified benchmark
+  contract has focused tests and CI; dependencies are tracked in `requirements.txt`.

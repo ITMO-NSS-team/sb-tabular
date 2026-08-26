@@ -20,8 +20,9 @@ optuna>=4.2
 sdv          # CTGAN wrapper (CTGANSynthesizer)
 tabpfgen     # TabPFGen wrapper
 
-# Dataset download (sbtab/data/get_datasets.py)
+# Dataset acquisition
 ucimlrepo
+kagglehub>=1.0
 
 # Optional
 # geotorch   # LightSB with full covariance (is_diagonal=False) only
