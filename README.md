@@ -264,10 +264,12 @@ root (or add it to `PYTHONPATH`) so that `import sbtab` resolves.
 
 The model-independent benchmark foundation lives in `sbtab/benchmark/`. It defines explicit
 raw column semantics, missing and split policies, fold-local preprocessing, the thin adapter
-boundary, fixed-configuration runners, and resumable fold artifacts. Evaluation formulas live
-in `sbtab/evaluation/` and consume only decoded raw tables. See
+boundary, fixed-configuration runners, a reusable model-owned Optuna lifecycle, and resumable
+fold artifacts. Evaluation formulas live in `sbtab/evaluation/` and consume only decoded raw
+tables. See
 [`docs/benchmark-contract.md`](docs/benchmark-contract.md),
-[`docs/benchmark-metrics.md`](docs/benchmark-metrics.md), and
+[`docs/benchmark-metrics.md`](docs/benchmark-metrics.md),
+[`docs/benchmark-tuning.md`](docs/benchmark-tuning.md), and
 [`docs/benchmark-artifacts.md`](docs/benchmark-artifacts.md).
 
 Run its focused tests from the repository root:

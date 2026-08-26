@@ -279,9 +279,11 @@ table of the same size as the real training fold.
 
 `HoldoutRunConfig` and `BenchmarkConfig` contain only shared split, missing,
 seed, device, run-label, and artifact-path controls. The runner has no Optuna
-dependency and receives no model hyperparameters. A model-owned tuner closes
-over one fixed typed model configuration in its adapter factory, executes the
-holdout runner, and calculates an objective from returned raw tables.
+dependency and receives no model hyperparameters. The reusable Optuna layer
+described in [`benchmark-tuning.md`](benchmark-tuning.md) owns the common study
+lifecycle and invokes this runner. A model-owned tuner supplies only its typed
+search space, adapter construction, configuration serialization, and known
+numerical-failure policy.
 
 Fit and sample timings cover only completed adapter calls. They exclude
 missing-value handling, splitting, codec fitting, inverse decoding, artifact
