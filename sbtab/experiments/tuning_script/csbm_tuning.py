@@ -90,10 +90,11 @@ def make_csbm_objective(train_cat_t, val_cat_np, cardinalities, order_mask, ds_n
         dropout = trial.suggest_float("dropout", 0.01, 0.3)
 
         # Solver Params
-        steps = trial.suggest_int("steps", 20, 100, step=10)
+        steps = trial.suggest_int("num_steps", 200, 2000, log=True)
         num_outer_iterations = trial.suggest_int("num_outer_iterations", 2, 10)
-        epochs = trial.suggest_int("epochs", 5, 20)
-        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512])
+        inner_iters = trial.suggest_int("inner_iters", 500, 4000, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
+        epochs = int(inner_iters * batch_size / train_cat_t)
 
         # Optimization
         fw_lr = trial.suggest_float("forward_lr", 1e-4, 2e-3, log=True)
@@ -126,8 +127,8 @@ def make_csbm_objective(train_cat_t, val_cat_np, cardinalities, order_mask, ds_n
             dropout=dropout
         ).to(device)
 
-        fw_opt = torch.optim.Adam(fw_model.parameters(), lr=fw_lr, weight_decay=fw_decay)
-        bw_opt = torch.optim.Adam(bw_model.parameters(), lr=bw_lr, weight_decay=bw_decay)
+        fw_opt = torch.optim.AdamW(fw_model.parameters(), lr=fw_lr, weight_decay=fw_decay)
+        bw_opt = torch.optim.AdamW(bw_model.parameters(), lr=bw_lr, weight_decay=bw_decay)
 
         # Class initializations
         process = CategoricalReference(
@@ -337,8 +338,8 @@ if __name__ == "__main__":
             dropout=bp["dropout"]
         ).to(args.device)
 
-        fw_opt = torch.optim.Adam(fw_model.parameters(), lr=bp["forward_lr"], weight_decay=bp["forward_weight_decay"])
-        bw_opt = torch.optim.Adam(bw_model.parameters(), lr=bp["backward_lr"], weight_decay=bp["backward_weight_decay"])
+        fw_opt = torch.optim.AdamW(fw_model.parameters(), lr=bp["forward_lr"], weight_decay=bp["forward_weight_decay"])
+        bw_opt = torch.optim.AdamW(bw_model.parameters(), lr=bp["backward_lr"], weight_decay=bp["backward_weight_decay"])
 
         process = CategoricalReference(
             cardinalities,
@@ -396,6 +397,7 @@ if __name__ == "__main__":
             return s_df[all_cat_discrete_cols]
 
 
+        # Generate validation size synthetic data for evaluation metrics
         noise_val = create_noise_dataset(len(val_df), cardinalities, args.device)
         x_synth_val_tensor, _ = sampler_ds.simulate(
             x_init=noise_val,
@@ -404,6 +406,7 @@ if __name__ == "__main__":
         )
         synth_val_df = tensors_to_dataframe(x_synth_val_tensor, len(val_df))
 
+        # Generate train size synthetic data for ML efficacy evaluation
         noise_train = create_noise_dataset(len(train_df), cardinalities, args.device)
         x_synth_train_tensor, _ = sampler_ds.simulate(
             x_init=noise_train,

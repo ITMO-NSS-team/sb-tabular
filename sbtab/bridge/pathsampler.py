@@ -202,8 +202,8 @@ class MixedPathSampler:
 
         device = x_cont_init.device if self.has_cont else x_cat_init.device
         K = self.timegrid.num_steps
-        t_vals = self.timegrid.times().to(device)
-        g = self.timegrid.gammas().to(device)
+
+        dt = torch.tensor(1.0 / K, device=device, dtype=torch.float32)
 
         total_samples = x_cont_init.shape[0] if self.has_cont else x_cat_init.shape[0]
         bs = batch_size if batch_size is not None else total_samples
@@ -229,13 +229,17 @@ class MixedPathSampler:
                 ks = range(K) if direction == "f" else range(K, 0, -1)
 
                 for k in ks:
-                    t_idx = k if direction == "f" else k - 1
-                    tk = t_vals[t_idx].expand(b_size, 1)
+                    if direction == "f":
+                        tau = float(k) / float(K)
+                    else:
+                        tau = 1.0 - float(K - k) / float(K)
+
+                    tk = torch.full((b_size, 1), tau, device=device, dtype=torch.float32)
 
                     v_num, logits_cat = model(b_cont, b_cat, tk)
 
                     if self.has_cont:
-                        b_cont = self.integrator.step(b_cont, drift=v_num, gamma=g[t_idx], generator=b_gen)
+                        b_cont = self.integrator.step(b_cont, drift=v_num, gamma=dt, generator=b_gen)
 
                     if self.has_cat:
                         if direction == "f":
@@ -259,13 +263,15 @@ class MixedPathSampler:
             model.train(was_training)
 
         final_cont = torch.cat(result_cont, dim=0) if self.has_cont else torch.empty((total_samples, 0), device=device)
-        final_cat = torch.cat(result_cat, dim=0) if self.has_cat else torch.empty((total_samples, 0), dtype=torch.long, device=device)
+        final_cat = torch.cat(result_cat, dim=0) if self.has_cat else torch.empty((total_samples, 0), dtype=torch.long,
+                                                                                  device=device)
 
         paths = None
         if return_path:
             paths = {
-                "cont": torch.cat(path_cont_chunks, dim=1) if self.has_cont else torch.empty((K+1, total_samples, 0)),
-                "cat": torch.cat(path_cat_chunks, dim=1) if self.has_cat else torch.empty((K+1, total_samples, 0), dtype=torch.long),
+                "cont": torch.cat(path_cont_chunks, dim=1) if self.has_cont else torch.empty((K + 1, total_samples, 0)),
+                "cat": torch.cat(path_cat_chunks, dim=1) if self.has_cat else torch.empty((K + 1, total_samples, 0),
+                                                                                          dtype=torch.long),
             }
 
         return final_cont, final_cat, paths

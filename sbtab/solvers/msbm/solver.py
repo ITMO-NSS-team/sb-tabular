@@ -1,4 +1,3 @@
-import copy
 from typing import List, Optional, Dict, Any, Tuple, Literal
 import torch
 from tqdm import tqdm
@@ -87,6 +86,29 @@ class MixedSBMSolver:
         self.last_b_state = None
         self._fitted = False
 
+    def _resolve_sim_batch_size(self, *tensors: Optional[torch.Tensor]) -> int:
+        """
+        Chunk size for path simulation.
+
+        Args:
+            tensors (Optional[torch.Tensor]): tensors which are used at the start of simulation.
+
+        Returns:
+            int: Chunk size for path simulation.
+        """
+        n = 0
+        for t in tensors:
+            if t is not None and t.numel() > 0:
+                n = int(t.shape[0])
+                break
+        sim_bs = getattr(self.cfg, "sim_batch_size", None)
+        if sim_bs is None:
+            sim_bs = 100_000 if not self.has_cat else 16_384
+        elif self.has_cat:
+            sim_bs = min(sim_bs, 16_384)
+        sim_bs = max(1, int(sim_bs))
+        return min(sim_bs, n) if n > 0 else sim_bs
+
     @torch.no_grad()
     def _generate_coupling(
         self,
@@ -119,7 +141,7 @@ class MixedSBMSolver:
         if prev_state is None:
             return data_num, data_cat, prior_num, prior_cat
 
-        orig_state = copy.deepcopy(self.model.state_dict())
+        orig_state = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
         was_training = self.model.training
 
         try:
@@ -139,7 +161,7 @@ class MixedSBMSolver:
                 model=self.model,
                 direction=prev_dir,
                 seed=seed,
-                batch_size=self.cfg.batch_size,
+                batch_size=self._resolve_sim_batch_size(start_num, start_cat),
             )
         finally:
             self.model.load_state_dict(orig_state)
@@ -160,6 +182,8 @@ class MixedSBMSolver:
     ) -> None:
         """
         Calls updater to train forward or backward direction part of the loop.
+        Budget is resolved inside MixedSBMUpdater.train_epochs from cfg
+        (steps_per_direction / epochs_per_direction) and floored by cfg.min_steps_per_direction.
 
         Args:
             direction (Literal["f", "b"]): Direction of the imf loop.
@@ -171,7 +195,10 @@ class MixedSBMSolver:
         Returns:
             None
         """
-        self.updater.train_epochs(direction, z0_num, z0_cat, z1_num, z1_cat, epochs=self.cfg.epochs_per_direction)
+        self.updater.train_epochs(
+            direction, z0_num, z0_cat, z1_num, z1_cat,
+            min_steps=self.cfg.min_steps_per_direction
+        )
 
     def fit(self, train_num: torch.Tensor | None, train_cat: torch.Tensor | None) -> MixedSBMSolver:
         """
@@ -189,12 +216,15 @@ class MixedSBMSolver:
         """
         if train_num is not None and train_num.numel() > 0:
             N = train_num.shape[0]
-            train_num = train_num.to(self.device)
         elif train_cat is not None and train_cat.numel() > 0:
             N = train_cat.shape[0]
-            train_cat = train_cat.to(self.device)
         else:
             raise ValueError("Train data is empty.")
+
+        if train_num is not None:
+            train_num = train_num.to(self.device)
+        if train_cat is not None:
+            train_cat = train_cat.to(self.device)
 
         if train_num is None or train_num.numel() == 0:
             train_num = torch.empty((N, 0), device=self.device)
@@ -279,7 +309,7 @@ class MixedSBMSolver:
                 "No backward snapshot found. Ensure fb_sequence contains at least one 'b'."
             )
 
-        orig_state = copy.deepcopy(self.model.state_dict())
+        orig_state = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
         was_training = self.model.training
 
         try:
@@ -300,9 +330,7 @@ class MixedSBMSolver:
                     dim=1,
                 )
                 if self.has_cat
-                else torch.empty(
-                    (n_samples, 0), dtype=torch.long, device=self.device
-                )
+                else torch.empty((n_samples, 0), dtype=torch.long, device=self.device)
             )
 
             gen_num, gen_cat, _ = self.sampler.simulate(
@@ -311,7 +339,7 @@ class MixedSBMSolver:
                 model=self.model,
                 direction="b",
                 seed=seed,
-                batch_size=self.cfg.batch_size,
+                batch_size=self._resolve_sim_batch_size(start_num, start_cat),
             )
         finally:
             self.model.load_state_dict(orig_state)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import pickle
 import random
@@ -35,76 +36,73 @@ def seed_everything(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
 
-
-def make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, cardinalities, is_ordered, seed, device,
-                        ds_name):
-    """Optuna objective builder for MSBM."""
+def make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np,
+                        cardinalities, is_ordered, seed, device, ds_name):
+    cont_dim = train_num_t.shape[1] if train_num_t.numel() > 0 else 0
 
     def objective(trial: optuna.trial.Trial):
         seed_everything(seed + trial.number)
 
-        # MSBM Hyperparameters
+        # --- Architecture ---
         cat_emb_dim = trial.suggest_int("cat_emb_dim", 8, 32)
         hidden_dim = trial.suggest_categorical("hidden_dim", [128, 256, 512])
         time_dim = trial.suggest_int("time_dim", 32, 128, step=32)
         n_layers = trial.suggest_int("n_layers", 2, 6)
+        dropout = trial.suggest_float("dropout", 0.0, 0.3)
+        num_steps = trial.suggest_int("num_steps", 200, 2000, log=True)
 
-        steps = trial.suggest_int("num_steps", 20, 100, step=10)
-        sigma = trial.suggest_float("sigma", 0.01, 1.0)
-        alpha = trial.suggest_float("alpha", 0.01, 1.0)
-        eps = trial.suggest_float("eps", 1e-4, 5e-3, log=True)
+        # --- Continuous part ---
+        if cont_dim > 0:
+            sigma = trial.suggest_float("sigma", 0.03, 0.30, log=True)
+            lambda_num = trial.suggest_float("lambda_num", 0.1, 1.0)
+            noise = trial.suggest_categorical("noise", [True, False])
+        else:
+            sigma, lambda_num, noise = 0.1, 1.0, True
 
-        lambda_num = trial.suggest_float("lambda_num", 0.1, 1.0)
-        lambda_cat = trial.suggest_float("lambda_cat", 0.1, 1.0)
-        ce_lmbda = trial.suggest_float("ce_lambda", 0.01, 1.0)
+        # --- Categorical part ---
+        if cardinalities:
+            alpha = trial.suggest_float("alpha", 0.01, 1.0)
+            lambda_cat = trial.suggest_float("lambda_cat", 0.1, 1.0)
+            ce_lambda = trial.suggest_float("ce_lambda", 0.01, 1.0)
+            if alpha * math.sqrt(num_steps) < 0.8:
+                raise optuna.exceptions.TrialPruned("under-mixed reference (alpha*sqrt(K) < 0.8)")
+        else:
+            alpha, lambda_cat, ce_lambda = 0.05, 1.0, 0.001
 
-        noise = trial.suggest_categorical("noise", [True, False])
-        imf_len = trial.suggest_int("imf_len", 3, 9, step=2)
-        fb_sequence = tuple("b" if i % 2 == 0 else "f" for i in range(imf_len))
-
-        lr = trial.suggest_float("lr", 1e-4, 2e-3, log=True)
+        # --- Budget ---
+        lr = trial.suggest_float("lr", 5e-4, 2e-3, log=True)
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512])
-        epochs = trial.suggest_int("epochs_per_direction", 5, 20)
-
-        grad_clip = trial.suggest_float("grad_clip", 0.1, 1.0)
-        dropout = trial.suggest_float("dropout", 0.01, 0.3)
+        batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
+        steps_per_direction = trial.suggest_int("steps_per_direction", 500, 4000, log=True)
+        imf_len = trial.suggest_int("imf_len", 3, 7, step=2)
+        grad_clip = trial.suggest_float("grad_clip", 0.0, 1.0)
 
         cfg = MixedSBMConfig(
-            cat_emb_dim=cat_emb_dim,
-            hidden_dim=hidden_dim,
-            time_dim=time_dim,
-            n_layers=n_layers,
-            dropout=dropout,
-            weight_decay=weight_decay,
-            num_steps=steps,
-            sigma=sigma,
-            alpha=alpha,
-            eps=eps,
-            lambda_num=lambda_num,
-            lambda_cat=lambda_cat,
-            ce_lambda=ce_lmbda,
-            noise=noise,
-            lr=lr,
-            batch_size=batch_size,
-            epochs_per_direction=epochs,
+            fb_sequence=tuple("b" if i % 2 == 0 else "f" for i in range(imf_len)),
+            cat_emb_dim=cat_emb_dim, hidden_dim=hidden_dim, time_dim=time_dim,
+            n_layers=n_layers, dropout=dropout, weight_decay=weight_decay,
+            num_steps=num_steps, sigma=sigma, alpha=alpha,
+            lambda_num=lambda_num, lambda_cat=lambda_cat, ce_lambda=ce_lambda,
+            noise=noise, lr=lr, batch_size=batch_size,
+            steps_per_direction=steps_per_direction,
+            epochs_per_direction=None,
+            min_steps_per_direction=0,
+            grad_clip=grad_clip,
             device=device,
-            seed=seed,
-            fb_sequence=fb_sequence,
-            grad_clip=grad_clip
+            seed=seed + trial.number,
+            sim_batch_size=1024 if len(train_num_t) + len(train_cat_t) > 15000 else len(train_num_t) + len(train_cat_t)
         )
 
-        cont_dim = train_num_t.shape[1] if train_num_t.numel() > 0 else 0
-        solver = MixedSBMSolver(continuous_dim=cont_dim, cardinalities=cardinalities, is_ordered=is_ordered, cfg=cfg)
-
+        solver = MixedSBMSolver(continuous_dim=cont_dim, cardinalities=cardinalities,
+                                is_ordered=is_ordered, cfg=cfg)
         try:
             solver.fit(train_num_t, train_cat_t)
-            gen_num_t, gen_cat_t = solver.sample(n_samples=val_num_np.shape[0] if cont_dim > 0 else val_cat_np.shape[0],
-                                                 seed=seed)
+            n_gen = val_num_np.shape[0] if cont_dim > 0 else val_cat_np.shape[0]
+            gen_num_t, gen_cat_t = solver.sample(n_samples=n_gen, seed=seed + trial.number)
         except Exception as e:
-            Metrics.log_trial_error(trial, str(e), extra={"seed": seed, "dataset": ds_name, "device": device})
+            Metrics.log_trial_error(trial, str(e),
+                                    extra={"seed": seed + trial.number, "dataset": ds_name, "device": device})
             raise optuna.exceptions.TrialPruned()
-
         finally:
             del solver
             gc.collect()
@@ -121,21 +119,23 @@ def make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, cardin
             seed
         )
 
-        if np.isnan(wd_loss) or np.isnan(js_loss):
-            msg = "Loss is NaN"
-            Metrics.log_trial_error(trial, msg, extra={"seed": seed, "dataset": ds_name, "device": device})
-            raise optuna.exceptions.TrialPruned(msg)
+        mi_err = Metrics.pairwise_mi_error_codes(val_cat_np, gen_cat_t.detach().cpu().numpy(),
+                                                 cardinalities) if cardinalities else 0.0
+
+        if np.isnan(wd_loss) or np.isnan(js_loss) or np.isnan(mi_err):
+            Metrics.log_trial_error(trial, "Loss is NaN",
+                                    extra={"seed": seed + trial.number, "dataset": ds_name, "device": device})
+            raise optuna.exceptions.TrialPruned("Loss is NaN")
 
         trial.set_user_attr("wasserstein", wd_loss)
         trial.set_user_attr("jensen_shannon", js_loss)
+        trial.set_user_attr("pairwise_mi_err", mi_err)
 
         return wd_loss + js_loss
 
     return objective
 
 class NumpyEncoder(json.JSONEncoder):
-    """Encodes NumPy types for JSON serialization."""
-
     def default(self, obj):
         if isinstance(obj, np.integer): return int(obj)
         if isinstance(obj, np.floating): return float(obj)
@@ -147,12 +147,13 @@ if __name__ == "__main__":
     seed_everything(seed)
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pickle", type=str, default="../../data/datasets/datasets_continuous_only.pkl")
+    ap.add_argument("--pickle", type=str, default="../../data/datasets/datasets_mixed.pkl")
     ap.add_argument("--datasets", type=str, default="all")
     ap.add_argument("--test-size", type=float, default=0.2)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--n-trials", type=int, default=60)
     ap.add_argument("--outdir", type=str, default="msbm_optuna_results")
+    ap.add_argument("--mi-weight", type=float, default=0.5)
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -160,8 +161,8 @@ if __name__ == "__main__":
 
     with open(args.pickle, "rb") as f:
         my_data = pickle.load(f)
-    dataset_keys = list(my_data.keys()) if args.datasets.lower() == "all" else [k.strip() for k in
-                                                                                args.datasets.split(",")]
+    dataset_keys = list(my_data.keys()) if args.datasets.lower() == "all" else \
+        [k.strip() for k in args.datasets.split(",")]
 
     sampler = optuna.samplers.TPESampler(seed=seed)
     for ds_name in dataset_keys:
@@ -224,11 +225,10 @@ if __name__ == "__main__":
             cat_categories = {col: list(global_encoder.categories_[i]) for i, col in enumerate(all_cat_discrete_cols)}
             cardinalities = [len(cat_categories[col]) for col in all_cat_discrete_cols]
         else:
-            cat_categories, train_cat_np, val_cat_np, cardinalities = ({},
-                                                                       np.empty((len(train_df), 0), dtype=int),
-                                                                       np.empty((len(val_df), 0), dtype=int),
-                                                                       []
-                                                                       )
+            cat_categories = {}
+            train_cat_np = np.empty((len(train_df), 0), dtype=int)
+            val_cat_np = np.empty((len(val_df), 0), dtype=int)
+            cardinalities = []
 
         order_dict = {
             "Adult": ['education', 'education-num'],
@@ -256,13 +256,15 @@ if __name__ == "__main__":
         train_num_t = torch.tensor(train_num_np, dtype=torch.float32, device=args.device)
         train_cat_t = torch.tensor(train_cat_np, dtype=torch.long, device=args.device)
 
-        study = optuna.create_study(study_name=f"msbm_study_{ds_name}", storage=f"sqlite:///{outdir}/msbm_optuna.db",
+        study = optuna.create_study(study_name=f"msbm_study_{ds_name}",
+                                    storage=f"sqlite:///{outdir}/msbm_optuna.db",
                                     load_if_exists=True, direction="minimize", sampler=sampler)
 
         study.optimize(
-            make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, cardinalities, order_mask, seed,
-                                args.device, ds_name), n_trials=args.n_trials, gc_after_trial=True,
-            show_progress_bar=True)
+            make_msbm_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, cardinalities,
+                                order_mask, seed, args.device, ds_name),
+            n_trials=args.n_trials, gc_after_trial=True, show_progress_bar=True
+        )
 
         all_trials = study.get_trials(deepcopy=False, states=[optuna.trial.TrialState.COMPLETE])
         all_trials.sort(key=lambda t: t.value)
@@ -276,27 +278,16 @@ if __name__ == "__main__":
             print(f"\nTrying trial ranking {trial_idx + 1} (Trial {best_trial.number}) with value: {best_trial.value}")
 
             final_cfg = MixedSBMConfig(
-                cat_emb_dim=bp["cat_emb_dim"],
-                hidden_dim=bp["hidden_dim"],
-                time_dim=bp["time_dim"],
-                n_layers=bp["n_layers"],
-                num_steps=bp["num_steps"],
-                sigma=bp["sigma"],
-                alpha=bp["alpha"],
-                eps=bp["eps"],
-                ce_lambda=bp["ce_lambda"],
-                grad_clip=bp["grad_clip"],
                 fb_sequence=tuple("b" if i % 2 == 0 else "f" for i in range(bp["imf_len"])),
-                dropout=bp["dropout"],
-                lambda_num=bp["lambda_num"],
-                lambda_cat=bp["lambda_cat"],
-                weight_decay=bp["weight_decay"],
-                noise=bp["noise"],
-                lr=bp["lr"],
-                batch_size=bp["batch_size"],
-                epochs_per_direction=bp["epochs_per_direction"],
-                device=args.device,
-                seed=seed + best_trial.number
+                cat_emb_dim=bp["cat_emb_dim"], hidden_dim=bp["hidden_dim"], time_dim=bp["time_dim"],
+                n_layers=bp["n_layers"], dropout=bp["dropout"], weight_decay=bp["weight_decay"],
+                num_steps=bp["num_steps"], sigma=bp.get("sigma", 0.1), alpha=bp.get("alpha", 0.05),
+                lambda_num=bp.get("lambda_num", 1.0), lambda_cat=bp.get("lambda_cat", 1.0),
+                ce_lambda=bp.get("ce_lambda", 0.001), noise=bp.get("noise", True),
+                lr=bp["lr"], batch_size=bp["batch_size"],
+                steps_per_direction=bp["steps_per_direction"],
+                epochs_per_direction=None, min_steps_per_direction=600,
+                grad_clip=bp["grad_clip"], device=args.device, seed=seed + best_trial.number,
             )
 
             final_solver = MixedSBMSolver(continuous_dim=train_num_t.shape[1], cardinalities=cardinalities,
@@ -312,22 +303,21 @@ if __name__ == "__main__":
                        gen_num_train.isnan().any() or gen_cat_train.isnan().any()
 
             if not has_nans:
-                print(f"-> Success! Generated data contains no NaNs.")
+                print("-> Success! Generated data contains no NaNs.")
                 successful_generation = True
                 break
-            else:
-                print(f"-> Warning: Trial {trial.number} produced NaNs. Skipping to next best trial")
+            print(f"-> Warning: Trial {trial.number} produced NaNs. Skipping to next best trial")
 
         if not successful_generation:
-            raise RuntimeError(
-                "All completed Optuna trials produced NaN values during generation. Check your model stability/hyperparameters.")
+            raise RuntimeError("All completed Optuna trials produced NaN values during generation.")
 
         def tensors_to_dataframe(g_num, g_cat, n_samples):
             """Inverse transforms tensors back into a Pandas DataFrame."""
             s_df = pd.DataFrame(index=range(n_samples))
             if num_cols and g_num is not None:
                 s_num = scaler.inverse_transform(g_num.cpu().numpy())
-                for i, col in enumerate(num_cols): s_df[col] = s_num[:, i]
+                for i, col in enumerate(num_cols):
+                    s_df[col] = s_num[:, i]
             if all_cat_discrete_cols and g_cat is not None:
                 g_cat_np = g_cat.cpu().numpy()
                 for i, col in enumerate(all_cat_discrete_cols):
@@ -341,7 +331,8 @@ if __name__ == "__main__":
 
                     col_data[out_range] = len(cats)
                     s_df[col] = ext_cats[col_data]
-                    if is_numeric: s_df[col] = s_df[col].astype(type(cats[0]))
+                    if is_numeric:
+                        s_df[col] = s_df[col].astype(type(cats[0]))
             return s_df[train_df.columns]
 
 
@@ -355,7 +346,6 @@ if __name__ == "__main__":
         pure_cat_cols = [c for c in cat_cols if c in true_val_eval_df.columns and c not in bad_cols]
         num_present = [c for c in num_cols if c in true_val_eval_df.columns and c not in bad_cols]
         synth_val_df = tensors_to_dataframe(gen_num_val, gen_cat_val, len(val_df))
-
         all_cat_discrete_eval = [c for c in (discrete_present + pure_cat_cols) if c in true_val_eval_df.columns]
 
         results = {
@@ -366,22 +356,21 @@ if __name__ == "__main__":
             "Best_Tuning_Loss_Combined": best_trial.value,
             "Best_Tuning_WD_Scaled": best_trial.user_attrs.get("wasserstein"),
             "Best_Tuning_JS_Cat": best_trial.user_attrs.get("jensen_shannon"),
-            "Continuous_Mean_KL_50bins": Metrics.compute_kl_histogram_continuous(true_val_eval_df, synth_val_df, num_present,
-                                                                         bins=50) if num_present else None,
-            "Continuous_Corr_Pearson": Metrics.compute_corr_distance_for_columns(true_val_eval_df, synth_val_df, num_present,
-                                                                         method='pearson') if num_present else None,
-            "Discrete_Mean_KL": Metrics.average_kl_discrete(true_val_eval_df, synth_val_df,
-                                                    discrete_present) if discrete_present else None,
-            "Discrete_Corr_Spearman": Metrics.compute_corr_distance_for_columns(true_val_eval_df, synth_val_df,
-                                                                        discrete_present,
-                                                                        method='spearman') if discrete_present else None,
-            "Categorical_Mean_KL": Metrics.average_kl_discrete(true_val_eval_df, synth_val_df,
-                                                       pure_cat_cols) if pure_cat_cols else None,
+            "Best_Tuning_MI_Err": best_trial.user_attrs.get("pairwise_mi_err"),
+            "Continuous_Mean_KL_50bins": Metrics.compute_kl_histogram_continuous(
+                true_val_eval_df, synth_val_df, num_present, bins=50) if num_present else None,
+            "Continuous_Corr_Pearson": Metrics.compute_corr_distance_for_columns(
+                true_val_eval_df, synth_val_df, num_present, method='pearson') if num_present else None,
+            "Discrete_Mean_KL": Metrics.average_kl_discrete(
+                true_val_eval_df, synth_val_df, discrete_present) if discrete_present else None,
+            "Discrete_Corr_Spearman": Metrics.compute_corr_distance_for_columns(
+                true_val_eval_df, synth_val_df, discrete_present, method='spearman') if discrete_present else None,
+            "Categorical_Mean_KL": Metrics.average_kl_discrete(
+                true_val_eval_df, synth_val_df, pure_cat_cols) if pure_cat_cols else None,
             "Discrete_Cat_Mean_KL": Metrics.average_kl_discrete(
-                true_val_eval_df, synth_val_df, all_cat_discrete_eval
-            ) if all_cat_discrete_eval else None,
-            "Categorical_NMI": Metrics.compute_nmi_distance_matrix(true_val_eval_df, synth_val_df,
-                                                           pure_cat_cols) if pure_cat_cols else None,
+                true_val_eval_df, synth_val_df, all_cat_discrete_eval) if all_cat_discrete_eval else None,
+            "Categorical_NMI": Metrics.compute_nmi_distance_matrix(
+                true_val_eval_df, synth_val_df, pure_cat_cols) if pure_cat_cols else None,
             "MMD": Metrics.compute_mmd_numpy(val_num_np, gen_num_val.cpu().numpy(), seed=seed) if num_cols else None,
             **ml_eff
         }
@@ -389,11 +378,7 @@ if __name__ == "__main__":
         print(json.dumps(results, indent=4, cls=NumpyEncoder))
         (outdir / f"{ds_name}_final_metrics.json").write_text(json.dumps(results, indent=4, cls=NumpyEncoder))
 
-        train_pkl_path = outdir / f"{ds_name}_train.pkl"
-        test_pkl_path = outdir / f"{ds_name}.test.pkl"
-
-        with open(train_pkl_path, "wb") as f:
+        with open(outdir / f"{ds_name}_train.pkl", "wb") as f:
             pickle.dump(true_train_eval_df, f)
-
-        with open(test_pkl_path, "wb") as f:
+        with open(outdir / f"{ds_name}.test.pkl", "wb") as f:
             pickle.dump(true_val_eval_df, f)
