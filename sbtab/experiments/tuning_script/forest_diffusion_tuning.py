@@ -79,7 +79,7 @@ def make_forestdiff_objective(train_num_t, train_cat_t, val_num_np, val_cat_np, 
                 seed=seed + trial.number,
                 n_jobs=1 if use_gpu else -1,
                 gpu_hist=use_gpu,
-                n_batch=10
+                n_batch=0
             )
 
             n_val = val_num_np.shape[0] if val_num_np.shape[1] > 0 else val_cat_np.shape[0]
