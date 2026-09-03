@@ -153,7 +153,6 @@ if __name__ == "__main__":
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--n-trials", type=int, default=60)
     ap.add_argument("--outdir", type=str, default="msbm_optuna_results")
-    ap.add_argument("--mi-weight", type=float, default=0.5)
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
