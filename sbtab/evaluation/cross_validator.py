@@ -4,7 +4,7 @@ import random
 import os
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,7 @@ from sbtab.data.datamodule import TabularDataModule
 from sbtab.data.splits import SafeCategoricalKFold
 from sbtab.evaluation.metrics import Metrics
 from sbtab.models.neural.CSBMTableMLP import CSBMTableMLP
+from sbtab.solvers.continuous_time.joint_distribution.mlp.imf_dsbm.solver import IMFDSBMConfig, IMFDSBMSolver
 from sbtab.solvers.csbm import CSBMUpdater, CSBMSolver
 from sbtab.solvers.msbm import MixedSBMSolver, MixedSBMConfig
 
@@ -137,17 +138,25 @@ class CrossValidator:
             ).reset_index(drop=True)
             num_synth = len(train_fold)
 
+            ordered_lookup = set(self._ordered_cols())
+            is_ordered_mask = torch.tensor(
+                [c in ordered_lookup or c in clean_disc for c in all_cat_discrete],
+                dtype=torch.bool,
+            )
+
             if self.model_type == "csbm":
                 synth_df_temp, elapsed_time = self._train_and_sample_csbm(
-                    train_cat_t, fold_cardinalities, num_synth, all_cat_discrete, self.seed
+                    train_cat_t, fold_cardinalities, num_synth, all_cat_discrete,
+                    self.seed, is_ordered_mask,
                 )
                 synth_cat_np = synth_df_temp.values
                 synth_num_scaled = np.zeros((num_synth, len(clean_num)))
-            else:
-                ordered_cols = self._ordered_cols()
-                is_ordered_mask = torch.tensor(
-                    [c in ordered_cols for c in all_cat_discrete], dtype=torch.bool
+            elif self.model_type == "dsbm":
+                synth_num_scaled, elapsed_time = self._train_and_sample_dsbm(
+                    train_num_t, num_synth, self.seed
                 )
+                synth_cat_np = np.zeros((num_synth, 0), dtype=object)
+            else:
                 gen_num, gen_cat, elapsed_time = self._train_and_sample_msbm(
                     train_num_t, train_cat_t, fold_cardinalities,
                     is_ordered_mask, num_synth, self.seed,
@@ -221,18 +230,61 @@ class CrossValidator:
 
         return df_results
 
-    def _train_and_sample_csbm(self, train_tensor, cardinalities, num_samples, all_cat_discrete, fold_seed):
+    def _train_and_sample_dsbm(self, train_num_t, num_samples, fold_seed):
         bp = self.best_params
-        ordered_cols = self._ordered_cols()
-        order_mask = torch.tensor([c in ordered_cols for c in all_cat_discrete], dtype=torch.bool)
+        cfg = IMFDSBMConfig(
+            fb_sequence=tuple("b" if i % 2 == 0 else "f" for i in range(bp["imf_len"])),
+            num_steps=bp["num_steps"],
+            sigma=bp["sigma"],
+            eps=bp["eps"],
+            first_coupling=bp["first_coupling"],
+            inner_iters=bp["inner_iters"],
+            batch_size=bp["batch_size"],
+            lr=bp["lr"],
+            weight_decay=0.0,
+            grad_clip=1.0,
+            noise=bp["noise"],
+            device=self.device,
+            seed=fold_seed
+        )
+
+        solver = IMFDSBMSolver(dim=train_num_t.shape[1], cfg=cfg)
+        start = time.time()
+        solver.fit(train_num_t)
+        elapsed = time.time() - start
+
+        gen_num_t = solver.sample(n=num_samples, seed=fold_seed + 123, steps=bp["num_steps"])
+        return gen_num_t, elapsed
+
+    def _train_and_sample_csbm(self, train_tensor, cardinalities, num_samples,
+                               all_cat_discrete, fold_seed, is_ordered):
+        bp = self.best_params
+        order_mask = is_ordered
 
         timegrid = TimeGrid(num_steps=bp["steps"])
 
-        fw_model = CSBMTableMLP(cardinalities, bp["emb_dim"], bp["hidden_dim"], bp["time_dim"]).to(self.device)
-        bw_model = CSBMTableMLP(cardinalities, bp["emb_dim"], bp["hidden_dim"], bp["time_dim"]).to(self.device)
+        fw_model = CSBMTableMLP(
+            cardinalities=cardinalities,
+            n_layers=bp["n_layers"],
+            emb_dim=bp["emb_dim"],
+            hidden_dim=bp["hidden_dim"],
+            time_dim=bp["time_dim"],
+            dropout=bp["dropout"]
+        ).to(self.device)
 
-        fw_opt = torch.optim.Adam(fw_model.parameters(), lr=bp["forward_lr"], weight_decay=bp["forward_weight_decay"])
-        bw_opt = torch.optim.Adam(bw_model.parameters(), lr=bp["backward_lr"], weight_decay=bp["backward_weight_decay"])
+        bw_model = CSBMTableMLP(
+            cardinalities=cardinalities,
+            n_layers=bp["n_layers"],
+            emb_dim=bp["emb_dim"],
+            hidden_dim=bp["hidden_dim"],
+            time_dim=bp["time_dim"],
+            dropout=bp["dropout"]
+        ).to(self.device)
+
+        fw_opt = torch.optim.AdamW(fw_model.parameters(), lr=bp["forward_lr"],
+                                   weight_decay=bp["forward_weight_decay"])
+        bw_opt = torch.optim.AdamW(bw_model.parameters(), lr=bp["backward_lr"],
+                                   weight_decay=bp["backward_weight_decay"])
 
         process = CategoricalReference(cardinalities, is_ordered=order_mask,
                                        total_number_of_q_powers=bp["steps"], alpha=bp["alpha"],
@@ -264,13 +316,40 @@ class CrossValidator:
         bp = self.best_params
         cont_dim = train_num_t.shape[1] if train_num_t.numel() > 0 else 0
 
+        if "steps_per_direction" in bp:
+            steps_per_direction: Optional[int] = int(bp["steps_per_direction"])
+            epochs_per_direction: Optional[int] = None
+        elif "epochs_per_direction" in bp:
+            steps_per_direction = None
+            epochs_per_direction: Optional[int] = int(bp["epochs_per_direction"])
+        else:
+            raise KeyError(
+                f"{self.ds_name}: best_params contains neither 'steps_per_direction' "
+                f"nor 'epochs_per_direction' — cannot resolve MSBM training budget"
+            )
+
         cfg = MixedSBMConfig(
-            fb_sequence=tuple("b" if i % 2 == 0 else "f" for i in range(bp["imf_len"])),
-            cat_emb_dim=bp["cat_emb_dim"], hidden_dim=bp["hidden_dim"], time_dim=bp["time_dim"],
-            n_layers=bp["n_layers"], num_steps=bp["num_steps"], sigma=bp["sigma"],
-            alpha=bp["alpha"], lambda_num=bp["lambda_num"], lambda_cat=bp["lambda_cat"],
-            lr=bp["lr"], batch_size=bp["batch_size"], epochs_per_direction=bp["epochs_per_direction"],
-            grad_clip=bp["grad_clip"], device=self.device, seed=fold_seed
+            fb_sequence=tuple("b" if i % 2 == 0 else "f" for i in range(int(bp["imf_len"]))),
+            cat_emb_dim=bp["cat_emb_dim"],
+            hidden_dim=bp["hidden_dim"],
+            time_dim=bp["time_dim"],
+            n_layers=bp["n_layers"],
+            dropout=bp["dropout"],
+            weight_decay=bp["weight_decay"],
+            num_steps=bp["num_steps"],
+            sigma=bp.get("sigma", 0.1),
+            alpha=bp.get("alpha", 0.05),
+            lambda_num=bp.get("lambda_num", 1.0),
+            lambda_cat=bp.get("lambda_cat", 1.0),
+            ce_lambda=bp.get("ce_lambda", 0.001),
+            noise=bp.get("noise", True),
+            lr=bp["lr"],
+            batch_size=bp["batch_size"],
+            steps_per_direction=steps_per_direction,
+            epochs_per_direction=epochs_per_direction,
+            grad_clip=bp.get("grad_clip", 1.0),
+            device=self.device,
+            seed=fold_seed,
         )
 
         solver = MixedSBMSolver(continuous_dim=cont_dim, cardinalities=cardinalities, is_ordered=is_ordered, cfg=cfg)
@@ -314,7 +393,9 @@ class CrossValidator:
             metrics['Discrete_Cat_Mean_KL'] = Metrics.average_kl_discrete(
                 test_real_df, synth_df, all_discrete_cat
             )
+            metrics['Pairwise_MI_Err'] = Metrics.pairwise_mi_error(test_real_df, synth_df, all_discrete_cat)
         else:
+            metrics['Pairwise_MI_Err'] = np.nan
             metrics['Discrete_Cat_Mean_KL'] = np.nan
 
         if clean_disc:

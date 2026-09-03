@@ -264,3 +264,124 @@ class Metrics:
         """Drops NaNs synchronously from features and target."""
         combined = pd.concat([X, y.to_frame('__target__')], axis=1).dropna()
         return combined.drop('__target__', axis=1), combined['__target__']
+
+    @staticmethod
+    def _mi_pair(x: np.ndarray, y: np.ndarray, kx: int, ky: int) -> float:
+        """Plug-in mutual information (nats) between two integer code arrays.
+
+        The joint support is fixed to kx * ky cells (bincount with minlength),
+        so the plug-in bias is identical for any two samples evaluated on the
+        same grid — and therefore cancels in real-vs-synth differences.
+
+        Args:
+            x: Integer codes of the first variable, values in [0, kx).
+            y: Integer codes of the second variable, values in [0, ky).
+            kx: Support size of the first variable (e.g. its cardinality).
+            ky: Support size of the second variable (e.g. its cardinality).
+
+        Returns:
+            Mutual information estimate in nats.
+        """
+        flat = x.astype(np.int64) * ky + y.astype(np.int64)
+        pxy = np.bincount(flat, minlength=kx * ky).astype(np.float64).reshape(kx, ky)
+        pxy = pxy / pxy.sum()
+        px, py = pxy.sum(axis=1, keepdims=True), pxy.sum(axis=0, keepdims=True)
+        mask = pxy > 0
+        return float(np.sum(pxy[mask] * np.log(pxy[mask] / (px * py)[mask])))
+
+    @staticmethod
+    def pairwise_mi_error_codes(
+            real: np.ndarray,
+            synth: np.ndarray,
+            cardinalities: List[int]
+    ) -> float:
+        """Relative pairwise-MI error between real and synthetic discrete samples.
+
+        For every pair of discrete columns, computes the absolute difference of
+        plug-in mutual information (nats) between real and synthetic data, and
+        normalizes it by the mean real MI over all pairs:
+
+            sum_pairs |MI_real - MI_synth| / (mean_pairs MI_real + eps)
+
+        Scale-free (comparable across datasets) and insensitive to pairs that
+        carry almost no dependence. Codes outside [0, cardinality) are excluded
+        per pair. Since both real and synth are evaluated on the same
+        cardinality-fixed grid with (approximately) equal n, the plug-in bias
+        cancels in the difference.
+
+        Args:
+            real: Real discrete codes, shape [N, D]; -1 marks unseen categories.
+            synth: Synthetic discrete codes, shape [M, D]; -1 marks unseen categories.
+            cardinalities: Support sizes per column, length D. Fixes the joint grid
+                for both samples; do not infer it from the data, otherwise real and
+                synth may be evaluated on different grids and become incomparable.
+
+        Returns:
+            Relative pairwise-MI error (lower is better, 0 = perfect joint match).
+            Returns 0.0 when there are fewer than 2 columns or too few valid rows.
+        """
+        real = np.asarray(real, dtype=np.int64)
+        synth = np.asarray(synth, dtype=np.int64)
+        if real.ndim != 2 or synth.ndim != 2 or real.shape[1] != synth.shape[1]:
+            return 0.0
+        if real.shape[1] < 2 or len(real) < 10 or len(synth) < 10:
+            return 0.0
+
+        abs_errs, real_mis = [], []
+        for i in range(real.shape[1]):
+            for j in range(i + 1, real.shape[1]):
+                ci, cj = int(cardinalities[i]), int(cardinalities[j])
+                mr = (real[:, i] >= 0) & (real[:, i] < ci) & (real[:, j] >= 0) & (real[:, j] < cj)
+                ms = (synth[:, i] >= 0) & (synth[:, i] < ci) & (synth[:, j] >= 0) & (synth[:, j] < cj)
+                if mr.sum() < 10 or ms.sum() < 10:
+                    continue
+                mi_r = Metrics._mi_pair(real[mr, i], real[mr, j], ci, cj)
+                mi_s = Metrics._mi_pair(synth[ms, i], synth[ms, j], ci, cj)
+                abs_errs.append(abs(mi_r - mi_s))
+                real_mis.append(mi_r)
+
+        if not abs_errs:
+            return 0.0
+        return float(np.sum(abs_errs) / (np.mean(real_mis) + 1e-8))
+
+    @staticmethod
+    def pairwise_mi_error(real: pd.DataFrame, synth: pd.DataFrame, cat_cols: List[str]) -> float:
+        """Relative pairwise-MI error for DataFrames (see pairwise_mi_error_codes).
+
+        Category supports are factorized over the union of real+synth values per
+        column, so both samples are embedded into one common grid per pair.
+
+        Args:
+            real: Real DataFrame.
+            synth: Synthetic DataFrame.
+            cat_cols: Discrete/categorical columns present in both frames.
+
+        Returns:
+            Relative pairwise-MI error (lower is better). Returns 0.0 when fewer
+            than 2 valid columns or too few valid rows per pair.
+        """
+        cat_cols = [c for c in cat_cols if c in real.columns and c in synth.columns]
+        if len(cat_cols) < 2:
+            return 0.0
+
+        abs_errs, real_mis = [], []
+        for i in range(len(cat_cols)):
+            for j in range(i + 1, len(cat_cols)):
+                a_r, b_r = real[cat_cols[i]], real[cat_cols[j]]
+                a_s, b_s = synth[cat_cols[i]], synth[cat_cols[j]]
+                vr, vs = a_r.notna() & b_r.notna(), a_s.notna() & b_s.notna()
+                a_r, b_r, a_s, b_s = a_r[vr], b_r[vr], a_s[vs], b_s[vs]
+                if len(a_r) < 10 or len(a_s) < 10:
+                    continue
+                ka = pd.factorize(pd.concat([a_r, a_s], ignore_index=True).astype(str))[0]
+                kb = pd.factorize(pd.concat([b_r, b_s], ignore_index=True).astype(str))[0]
+                k = max(ka.max() + 1, kb.max() + 1)
+                n_r = len(a_r)
+                mi_r = Metrics._mi_pair(ka[:n_r], kb[:n_r], k, k)
+                mi_s = Metrics._mi_pair(ka[n_r:], kb[n_r:], k, k)
+                abs_errs.append(abs(mi_r - mi_s))
+                real_mis.append(mi_r)
+
+        if not abs_errs:
+            return 0.0
+        return float(np.sum(abs_errs) / (np.mean(real_mis) + 1e-8))

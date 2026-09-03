@@ -15,10 +15,10 @@ from sbtab.transforms.missing import DropMissingRows
 from sbtab.transforms.pipeline import TransformPipeline
 
 CONFIG = {
-    "model": "csbm",
-    "pickle": "../data/datasets/datasets_categorical.pkl",
-    "results_dir": "../experiments/tuning_script/csbm_optuna_results",
-    "output": "cv_csbm_results.csv",
+    "model": "msbm",
+    "pickle": "../data/datasets/datasets_mixed.pkl",
+    "results_dir": "../experiments/tuning_script/msbm_optuna_results",
+    "output": "cv_msbm_results.csv",
     "datasets": "all",
     "device": "cuda" if torch.cuda.is_available() else "cpu",
 }
